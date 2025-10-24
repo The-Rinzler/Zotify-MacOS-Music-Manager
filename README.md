@@ -1,0 +1,1 @@
+# Zotify-MacOS-Music-Manager
