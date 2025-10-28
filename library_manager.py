@@ -1,3 +1,5 @@
+from __future__ import annotations
+import sys
 """
 library_manager.py
 ==================
@@ -19,7 +21,6 @@ importing these functions should handle user interaction and error
 reporting according to their needs.
 """
 
-from __future__ import annotations
 
 import atexit
 import hashlib
