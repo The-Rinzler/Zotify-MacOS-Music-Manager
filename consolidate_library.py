@@ -39,6 +39,9 @@ from utils import CustomPrint, sanitize_filename
 from spotify_api import get_spotify_client
 import library_manager
 
+SCOPE = "playlist-read-private"
+CACHE_PATH = str(Path.home() / ".cache-spotipy")  # same as extractor
+REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")  # same as extractor
 
 def print_playlists_summary(
     zotify_music_dir: str,
@@ -168,9 +171,9 @@ def main() -> None:
 
     # Authenticate with Spotify using a loopback redirect URI
     sp = get_spotify_client(
-        cache_path=str(Path.home() / ".cache" / ".spotify_cache"),
-        redirect_uri="http://127.0.0.1:8888/callback",
-        scope="playlist-read-private",
+        scope=SCOPE,
+        cache_path=CACHE_PATH,
+        redirect_uri=REDIRECT_URI,
     )
 
     # Optionally refresh playlists from Spotify
