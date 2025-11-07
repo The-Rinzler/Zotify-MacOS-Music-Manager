@@ -1,6 +1,7 @@
 # Zotify-macOS Music Manager
 
 Works **with** my Zotify fork:  
+Only tested for playlists.
 <https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod>  
 Workflow: you run these tools to build/maintain playlists and `.song_ids`, then run Zotify to download, then re-run `consolidate_library.py` to reconcile.
 
@@ -16,7 +17,7 @@ Workflow: you run these tools to build/maintain playlists and `.song_ids`, then 
 - Xcode Command Line Tools
 - Homebrew
 - Python 3.10–3.12 installed and on `PATH`  
-_No full setup guide here; just ensure those exist._
+_Ensure those exist._
 
 
 ## 3) Clone
@@ -37,8 +38,7 @@ python3 -m venv ~/venvs/playlist-tools
 
 ## 5) Spotify API credentials
 
-5.1 Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-.  
+**5.1** Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
 **5.2** Copy **Client ID** and **Client Secret**.  
 **5.3** Redirect URI must be exactly: `http://127.0.0.1:9090` _(the code expects this)_.  
 **5.4** Add environment variables to your shell profile:
