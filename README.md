@@ -4,23 +4,30 @@ Works **with** my Zotify fork:
 <https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod>  
 Workflow: you run these tools to build/maintain playlists and `.song_ids`, then run Zotify to download, then re-run `consolidate_library.py` to reconcile.
 
+
 ## 1) What this project does
+
 - `playlist_extractor.py`: reads a Spotify playlist and updates your local playlist folder, `.m3u8`, and `.song_ids`.
 - `consolidate_library.py`: cleans old entries, fixes names, reconciles `.song_ids`, and reports drift.
 
+
 ## 2) Prerequisites (fresh macOS)
+
 - Xcode Command Line Tools
 - Homebrew
 - Python 3.10–3.12 installed and on `PATH`  
 _No full setup guide here; just ensure those exist._
 
+
 ## 3) Clone
+
 ```bash
 git clone https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git ~/Zotify-MacOS-Music-Manager
 cd ~/Zotify-MacOS-Music-Manager
 ```
 
 ## 4) Virtual environment
+
 ```bash
 python3 -m venv ~/venvs/playlist-tools
 ~/venvs/playlist-tools/bin/python -m pip install -U pip wheel
@@ -29,10 +36,12 @@ python3 -m venv ~/venvs/playlist-tools
 ```
 
 ## 5) Spotify API credentials
-5.1 Create an app in the Spotify Developer Dashboard.  
-5.2 Copy **Client ID** and **Client Secret**.  
-**5.3 Redirect URI must be exactly:** `http://127.0.0.1:9090` _(the code expects this)_.  
-5.4 Add environment variables to your shell profile:
+
+5.1 Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+.  
+**5.2** Copy **Client ID** and **Client Secret**.  
+**5.3** Redirect URI must be exactly: `http://127.0.0.1:9090` _(the code expects this)_.  
+**5.4** Add environment variables to your shell profile:
 - **zsh** (default on modern macOS): add to `~/.zshrc`
 - **bash**: add to `~/.bash_profile` or `~/.bashrc`
 ```bash
@@ -49,6 +58,7 @@ source ~/.bash_profile  # or ~/.bashrc
 ```
 
 ## 6) Run
+
 From the repo root:
 ```bash
 cd ~/Zotify-MacOS-Music-Manager
@@ -57,9 +67,11 @@ PYTHONPATH=. ~/venvs/playlist-tools/bin/python consolidate_library.py
 ```
 
 ## 7) Using with Zotify (your fork)
+
 Run Zotify (separately, in its own venv if you prefer) **after** `playlist_extractor.py` finishes, then re-run `consolidate_library.py` to reconcile any new downloads.
 
 ## 8) Optional aliases
+
 Place these **in the same shell profile** you edited above (`~/.zshrc` for zsh, or your bash profile). They:
 - `cd` into the repo,
 - run the scripts with the venv’s Python (no need to “activate”),
