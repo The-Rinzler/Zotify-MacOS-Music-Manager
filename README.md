@@ -4,16 +4,20 @@ Works **with** my Zotify fork:
 <https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod>  
 
 
+
 **Only tested for managing and downloading playlists.**
 
 
+
 Workflow: you run these tools to build/maintain playlists and `.song_ids`, then run Zotify to download, then re-run `consolidate_library.py` to reconcile.
+
 
 
 ## 1) What this project does
 
 - `playlist_extractor.py`: reads a Spotify playlist and updates your local playlist folder, `.m3u8`, and `.song_ids`.
 - `consolidate_library.py`: cleans old entries, fixes names, reconciles `.song_ids`, and reports drift.
+
 
 
 ## 2) Prerequisites (fresh macOS)
@@ -24,12 +28,14 @@ Workflow: you run these tools to build/maintain playlists and `.song_ids`, then 
 _Ensure those exist._
 
 
+
 ## 3) Clone
 
 ```bash
 git clone https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git ~/Zotify-MacOS-Music-Manager
 cd ~/Zotify-MacOS-Music-Manager
 ```
+
 
 ## 4) Virtual environment
 
@@ -72,6 +78,7 @@ source ~/.zshrc
 source ~/.bash_profile  # or ~/.bashrc
 ```
 
+
 ## 7) Run
 
 From the repo root:
@@ -81,9 +88,12 @@ PYTHONPATH=. ~/venvs/playlist-tools/bin/python playlist_extractor.py
 PYTHONPATH=. ~/venvs/playlist-tools/bin/python consolidate_library.py
 ```
 
+
 ## 8) Using with Zotify (with fork)
 
 Run Zotify (separately, in its own venv if you prefer) **after** `playlist_extractor.py` finishes, then re-run `consolidate_library.py` to reconcile any new downloads.
+
+
 
 ## 9) Optional aliases
 
@@ -101,6 +111,8 @@ Reload your shell, then run:
 playlist_extractor
 consolidate_library
 ```
+
+
 
 ## 10) Common pitfalls on a fresh install
 - Missing env vars or wrong redirect URI → Spotipy `invalid_client`.
