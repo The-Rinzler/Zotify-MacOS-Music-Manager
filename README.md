@@ -41,7 +41,9 @@ python3 -m venv ~/venvs/playlist-tools
 **5.1** Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
 
 **5.2** Copy **Client ID** and **Client Secret**.  
+
 **5.3** Redirect URI must be exactly: `http://127.0.0.1:9090` _(the code expects this)_.  
+
 **5.4** Add environment variables to your shell profile:
 - **zsh** (default on modern macOS): add to `~/.zshrc`
 - **bash**: add to `~/.bash_profile` or `~/.bashrc`
