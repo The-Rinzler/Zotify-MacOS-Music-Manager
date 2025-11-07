@@ -1,0 +1,20 @@
+# Zotify‑macOS Music Manager — Python dependencies
+# Python 3.10–3.12 recommended
+
+# Spotify Web API client
+spotipy>=2.25,<3
+
+# Tagging / ID3
+mutagen>=1.47,<2
+
+# CLI tables
+tabulate>=0.9,<0.10
+
+# HTTP stack (spotipy depends on requests; included here for clarity)
+requests>=2.31,<3
+
+# Image handling (album art utilities)
+Pillow>=10,<12
+
+# Optional cache backend used by spotipy; harmless if unused
+redis>=5,<6
