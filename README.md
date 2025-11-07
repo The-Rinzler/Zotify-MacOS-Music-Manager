@@ -1,8 +1,12 @@
 # Zotify-macOS Music Manager
 
 Works **with** my Zotify fork:  
-Only tested for playlists.
 <https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod>  
+
+
+**Only tested for managing and downloading playlists.**
+
+
 Workflow: you run these tools to build/maintain playlists and `.song_ids`, then run Zotify to download, then re-run `consolidate_library.py` to reconcile.
 
 
