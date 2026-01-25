@@ -56,7 +56,11 @@ __all__ = [
     "apply_song_ids_from_playlist_existing_only",
     "maybe_update_song_ids_from_playlist_existing_only",
     "rename_single_variant_to_canonical",
+    # NEW
+    "detect_legacy_archive",
+    "upgrade_legacy_archive",
 ]
+
 
 
 # Regular expressions reused across multiple helpers
@@ -584,3 +588,152 @@ def rename_single_variant_to_canonical(
             except Exception as e:
                 print(f">>> WARN: Could not rename '{variants[0]}' -> '{canon}': {e}")
         # If multiple variants exist, do nothing
+
+# =====================================================================
+# LEGACY .song_ids MIGRATION (STEP 1)
+# =====================================================================
+
+def _is_absolute_path(filepath: str) -> bool:
+    """Return True if filepath is absolute, False otherwise."""
+    return os.path.isabs(filepath)
+
+
+def _find_file_by_name_in_directory(playlist_dir: str, filename: str) -> Optional[str]:
+    """Find a file in playlist_dir by name and return its absolute path."""
+    try:
+        candidate = os.path.join(playlist_dir, filename)
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    except Exception:
+        pass
+    return None
+
+
+def _validate_audio_tags(filepath: str, expected_artist: str, expected_title: str) -> bool:
+    """
+    Best-effort validation that the audio file at filepath matches expected artist/title.
+
+    If mutagen is unavailable or tags cannot be read, returns True so migration
+    still proceeds as long as the file exists.
+    """
+    if not os.path.isfile(filepath):
+        return False
+
+    try:
+        try:
+            from mutagen.id3 import ID3
+
+            tags = ID3(filepath)
+
+            file_artist = str(tags.get("TPE1", "")).strip() if "TPE1" in tags else ""
+            file_title = str(tags.get("TIT2", "")).strip() if "TIT2" in tags else ""
+
+            expected_artist_norm = _nfc(expected_artist.strip()).casefold()
+            expected_title_norm = _nfc(expected_title.strip()).casefold()
+            file_artist_norm = _nfc(file_artist.strip()).casefold()
+            file_title_norm = _nfc(file_title.strip()).casefold()
+
+            return (file_artist_norm == expected_artist_norm and
+                    file_title_norm == expected_title_norm)
+        except Exception:
+            # mutagen not installed or tags unreadable – accept if file exists
+            return True
+    except Exception:
+        return True
+
+
+def detect_legacy_archive(hidden_file_path: str) -> bool:
+    """
+    Return True if .song_ids appears to be legacy (all paths relative), False otherwise.
+
+    Heuristic: inspect up to the first 10 non-empty, well-formed lines; if any
+    5th field is an absolute path, treat file as new format.
+    """
+    if not os.path.isfile(hidden_file_path):
+        return False
+
+    try:
+        with open(hidden_file_path, "r", encoding="utf-8") as f:
+            checked = 0
+            for line in f:
+                if checked >= 10:
+                    break
+                line = line.rstrip("\n")
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) != 5:
+                    continue
+                filepath = parts[4]
+                if _is_absolute_path(filepath):
+                    # already migrated / new format
+                    return False
+                checked += 1
+        return checked > 0
+    except Exception:
+        return False
+
+
+def upgrade_legacy_archive(playlist_dir: str, hidden_file_path: str) -> Tuple[int, int]:
+    """
+    Upgrade a legacy .song_ids file in playlist_dir to use absolute paths.
+
+    Returns (upgraded_count, validation_failures).
+    """
+    if not os.path.isfile(hidden_file_path):
+        return 0, 0
+
+    rows = _read_song_ids_rows(hidden_file_path)
+    upgraded_rows: List[Dict[str, object]] = []
+    validation_failures = 0
+
+    for row in rows:
+        track_id = row.get("id") or ""
+        artist = row.get("artist") or ""
+        song = row.get("song") or ""
+        filename = row.get("filename") or ""
+        ts_s = row.get("ts_s") or ""
+
+        if not (track_id and artist and song and filename):
+            validation_failures += 1
+            continue
+
+        file_path = _find_file_by_name_in_directory(playlist_dir, filename)
+        if not file_path:
+            CustomPrint.bold_print(
+                f"  ⚠️  Could not find file: {filename} (artist: {artist}, song: {song})",
+                "YELLOW",
+            )
+            validation_failures += 1
+            continue
+
+        if not _validate_audio_tags(file_path, artist, song):
+            CustomPrint.bold_print(
+                f"  ⚠️  Tags mismatch: {filename} (expected: {artist} - {song})",
+                "YELLOW",
+            )
+            validation_failures += 1
+            continue
+
+        row["filename"] = file_path  # now absolute
+        # keep ts_s / ts / id / artist / song unchanged
+        upgraded_rows.append(row)
+
+    # write back deterministically: id\t ts_s\t artist\t song\t filepath
+    new_lines: List[str] = []
+    for r in upgraded_rows:
+        new_lines.append(
+            f"{r['id']}\t{r['ts_s']}\t{r['artist']}\t{r['song']}\t{r['filename']}\n"
+        )
+
+    new_lines.sort(
+        key=lambda line: (
+            line.split("\t")[2].casefold(),  # artist
+            line.split("\t")[3].casefold(),  # song
+        )
+    )
+
+    with open(hidden_file_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+    return len(upgraded_rows), validation_failures
