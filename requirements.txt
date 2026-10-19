@@ -2,7 +2,7 @@
 # Python 3.10–3.12 recommended
 
 # Spotify Web API client
-spotipy>=2.25,<3
+spotipy>=2.26,<3
 
 # Tagging / ID3
 mutagen>=1.47,<2

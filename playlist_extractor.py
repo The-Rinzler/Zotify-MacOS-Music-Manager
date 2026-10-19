@@ -49,6 +49,52 @@ def get_playlist_url():
     return playlist_url
 
 
+def _nfc(value: str) -> str:
+    return unicodedata.normalize("NFC", value or "")
+
+
+def extract_playlist_tracks(items: list[dict]) -> list[dict]:
+    """Flatten playlist entries across Spotify's old and current response shapes."""
+    extracted = []
+    for entry in items:
+        track = (entry.get("item") or entry.get("track") or {}) if isinstance(entry, dict) else {}
+        if not track:
+            continue
+        track_id = track.get("id")
+        title = _nfc(track.get("name") or "")
+        artists = track.get("artists") or []
+        artist = _nfc(artists[0].get("name", "")) if artists else ""
+        isrc = ((track.get("external_ids") or {}).get("isrc") or "").upper()
+        if artist and title and track_id:
+            extracted.append({"artist": artist, "title": title, "id": track_id, "isrc": isrc})
+    return extracted
+
+
+def find_matching_playlist_dir(playlist_url: str, base_music_path: str) -> str | None:
+    """Find the existing playlist directory associated with a Spotify URL."""
+    if not os.path.isdir(base_music_path):
+        return None
+
+    for dir_name in os.listdir(base_music_path):
+        sanitized_dir_name = sanitize_filename(dir_name)
+        if dir_name != sanitized_dir_name:
+            os.rename(
+                os.path.join(base_music_path, dir_name),
+                os.path.join(base_music_path, sanitized_dir_name),
+            )
+            dir_name = sanitized_dir_name
+
+        dir_path = os.path.join(base_music_path, dir_name)
+        if os.path.isdir(dir_path):
+            hidden_file_path = os.path.join(dir_path, f".{dir_name}")
+            if os.path.isfile(hidden_file_path):
+                with open(hidden_file_path, "r") as file:
+                    url = file.read().strip()
+                    if url == playlist_url:
+                        return dir_path
+    return None
+
+
 if __name__ == "__main__":
     try:
         # Get the playlist URL
@@ -118,10 +164,6 @@ if __name__ == "__main__":
 
         # Define the base music path relative to the home directory
         base_music_path = os.path.join(home_dir, "Music", "Zotify Music")
-
-
-        def _nfc(s: str) -> str:
-            return unicodedata.normalize("NFC", s or "")
 
 
         def _base_name(artist: str, title: str) -> str:
@@ -235,28 +277,6 @@ if __name__ == "__main__":
                 f.writelines(out_lines)
 
             return added, flipped, deduped
-
-        def find_matching_playlist_dir(playlist_url, base_music_path):
-            for dir_name in os.listdir(base_music_path):
-                sanitized_dir_name = sanitize_filename(dir_name)
-                # Rename the directory if needed
-                if dir_name != sanitized_dir_name:
-                    os.rename(
-                        os.path.join(base_music_path, dir_name),
-                        os.path.join(base_music_path, sanitized_dir_name)
-                    )
-                    dir_name = sanitized_dir_name
-
-                dir_path = os.path.join(base_music_path, dir_name)
-                if os.path.isdir(dir_path):
-                    hidden_file_path = os.path.join(dir_path, f".{dir_name}")
-                    if os.path.isfile(hidden_file_path):
-                        with open(hidden_file_path, 'r') as file:
-                            url = file.read().strip()
-                            if url == playlist_url:
-                                return dir_path
-            return None
-
 
         # Check for a matching playlist directory
         matching_dir = find_matching_playlist_dir(playlist_url, base_music_path)
@@ -462,26 +482,6 @@ if __name__ == "__main__":
                     except Exception as e:
                         print(f">>> WARN: Could not rename '{variants[0]}' -> '{canon}': {e}")
                 # If multiple variants exist, do nothing (we won't guess)
-
-
-        def extract_playlist_tracks(items: list[dict]) -> list[dict]:
-            """
-            Flatten Spotipy playlist 'items' into [{'artist','title','id','isrc'}]
-            **matching Zotify's behavior**: use track['id'] directly.
-            """
-            out = []
-            for it in items:
-                tr = it.get("track") or {}
-                if not tr:
-                    continue
-                tid = tr.get("id")  # <-- Zotify uses plain ID
-                title = _nfc(tr.get("name") or "")
-                artists = tr.get("artists") or []
-                artist = _nfc(artists[0].get("name", "")) if artists else ""
-                isrc = ((tr.get("external_ids") or {}).get("isrc") or "").upper()
-                if artist and title and tid:
-                    out.append({"artist": artist, "title": title, "id": tid, "isrc": isrc})
-            return out
 
 
         BASE_RE = re.compile(
