@@ -13,6 +13,10 @@ class MacSetupTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "checkout with spaces"
         self.root.mkdir()
+        # Exercise canonical paths on Linux too (/var is a symlink on macOS).
+        linked_root = Path(self.tmp.name) / "linked checkout"
+        linked_root.symlink_to(self.root, target_is_directory=True)
+        self.root = linked_root
         self.script = Path(__file__).resolve().parents[1] / "scripts/setup_macos.sh"
         self.bin = Path(self.tmp.name) / "bin"
         self.bin.mkdir()
@@ -60,7 +64,7 @@ fi
         result = self.run_setup("--test")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.root / ".venv/bin/python").is_file())
-        self.assertEqual((self.root / ".venv/.zotify-setup-root").read_text().strip(), str(self.root))
+        self.assertEqual((self.root / ".venv/.zotify-setup-root").read_text().strip(), str(self.root.resolve()))
         commands = (Path(self.tmp.name) / "setup-commands").read_text()
         self.assertIn("-m pip install", commands)
         self.assertIn("-m pip check", commands)
