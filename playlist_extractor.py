@@ -17,13 +17,14 @@ from utils import write_playlist_to_m3u8
 from utils import get_possible_filenames
 from utils import create_hidden_playlist_link_file
 from datetime import datetime
+from typing import Callable, Union
+from zotify_lyrics import ZotifyAuthError, ZotifyTokenProvider
 
 # Import centralized Spotify API helpers and song ID management functions.
 from spotify_api import (
     get_spotify_client,
     extract_playlist_id as sp_extract_playlist_id,
     fetch_playlist_tracks,
-    get_spotify_bearer_token,
     fetch_track_lyrics,
     LYRICS_OK,
     LYRICS_AUTH_ERROR,
@@ -48,6 +49,9 @@ def get_playlist_url():
         action='store_true',
         help="Skip embedding missing lyrics from Spotify into previously downloaded tracks",
     )
+    parser.add_argument('--zotify-python', help="Zotify venv Python (or set ZOTIFY_PYTHON)")
+    parser.add_argument('--zotify-config-location', help="Existing Zotify config file/directory")
+    parser.add_argument('--zotify-credentials-location', help="Existing Zotify Login5 credentials file/directory")
     args = parser.parse_args()
 
     if args.playlist_url:
@@ -258,7 +262,7 @@ def backfill_playlist_lyrics(
     playlist_dir: str,
     track_metadata: list[tuple[str, str, str]],
     track_ids: dict[str, str],
-    bearer_token: str,
+    bearer_token: Union[str, Callable[[], str]],
     *,
     fetch=fetch_track_lyrics,
     sleep=time.sleep,
@@ -267,6 +271,7 @@ def backfill_playlist_lyrics(
 ) -> dict[str, int]:
     """Fetch missing lyrics from Spotify and embed them into playlist MP3s.
 
+    Accepts a lazy Zotify session token provider, evaluated only when needed.
     Mirrors the file matching of clean_playlist_lyrics (stays inside the
     playlist folder, dedupes by resolved path) and only ever writes files
     whose lyrics are empty. Uses Zotify's color-lyrics endpoint via
@@ -333,11 +338,19 @@ def backfill_playlist_lyrics(
             stats["no_track_id"] += 1
             continue
 
-        status, lyrics_text = fetch(track_id, bearer_token)
+        try:
+            status, lyrics_text = fetch(track_id, bearer_token)
+        except ZotifyAuthError as error:
+            CustomPrint.bold_print(f"!!! {error} Lyrics backfill aborted for this run.", "RED")
+            stats["errors"] += 1
+            stats["aborted"] = 1
+            break
         if status == LYRICS_AUTH_ERROR:
+            provider_name = "Zotify Login5 session" if callable(bearer_token) else "supplied bearer"
             CustomPrint.bold_print(
-                "!!! Spotify rejected the OAuth token for lyrics lookup - "
-                "backfill aborted for this run.",
+                f"!!! Spotify lyrics rejected the {provider_name} token "
+                f"({lyrics_text}; track {track_id}) - backfill aborted for this run. "
+                "This is an authorization failure, not a missing-lyrics result.",
                 "RED",
             )
             stats["aborted"] = 1
@@ -1528,33 +1541,30 @@ if __name__ == "__main__":
             CustomPrint.bold_print(
                 ">>> Backfilling missing embedded lyrics from Spotify...", "YELLOW"
             )
-            lyrics_token = get_spotify_bearer_token(sp)
-            if lyrics_token:
-                backfill_stats = backfill_playlist_lyrics(
-                    playlist_dir,
-                    track_metadata,
-                    build_playlist_track_ids(tracks),
-                    lyrics_token,
-                )
-                CustomPrint.bold_print(
-                    "*** Lyrics backfill: "
-                    f"embedded={backfill_stats['embedded']}, "
-                    f"already present={backfill_stats['already_present']}, "
-                    f"not on Spotify={backfill_stats['unavailable']}, "
-                    f"no track id={backfill_stats['no_track_id']}, "
-                    f"unmatched={backfill_stats['unmatched']}, "
-                    f"unsupported version={backfill_stats['unsupported_version']}, "
-                    f"errors={backfill_stats['errors']}"
-                    + (", ABORTED" if backfill_stats["aborted"] else "")
-                    + ".",
-                    "GREEN" if not backfill_stats["aborted"] else "RED",
-                )
-            else:
-                CustomPrint.bold_print(
-                    "!!! Lyrics backfill skipped: no usable Spotify OAuth token "
-                    "(run the extractor once interactively to authorise).",
-                    "RED",
-                )
+            lyrics_token = ZotifyTokenProvider(
+                python=extractor_args.zotify_python,
+                config_location=extractor_args.zotify_config_location,
+                credentials_location=extractor_args.zotify_credentials_location,
+            )
+            backfill_stats = backfill_playlist_lyrics(
+                playlist_dir,
+                track_metadata,
+                build_playlist_track_ids(tracks),
+                lyrics_token,
+            )
+            CustomPrint.bold_print(
+                "*** Lyrics backfill: "
+                f"embedded={backfill_stats['embedded']}, "
+                f"already present={backfill_stats['already_present']}, "
+                f"not on Spotify={backfill_stats['unavailable']}, "
+                f"no track id={backfill_stats['no_track_id']}, "
+                f"unmatched={backfill_stats['unmatched']}, "
+                f"unsupported version={backfill_stats['unsupported_version']}, "
+                f"errors={backfill_stats['errors']}"
+                + (", ABORTED" if backfill_stats["aborted"] else "")
+                + ".",
+                "GREEN" if not backfill_stats["aborted"] else "RED",
+            )
 
 
         def analyze_song_ids_file(playlist_dir: str) -> None:
