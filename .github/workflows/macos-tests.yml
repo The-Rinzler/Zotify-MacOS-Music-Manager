@@ -3,7 +3,7 @@ name: macOS offline tests
 on:
   pull_request:
   push:
-    branches: [release/macos-compat-setup]
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
