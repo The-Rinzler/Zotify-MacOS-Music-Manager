@@ -11,18 +11,19 @@ requires them. Install [Homebrew](https://brew.sh/) from its official instructio
 then:
 
 ```zsh
-brew install python@3.11 git
-git clone --branch release/macos-compat-setup https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git "$HOME/Zotify-MacOS-Music-Manager"
-cd "$HOME/Zotify-MacOS-Music-Manager"
-git branch --show-current
-git rev-parse HEAD
-PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --test
+brew install python@3.11 git && \
+  git clone --branch main https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git "$HOME/Zotify-MacOS-Music-Manager" && \
+  cd "$HOME/Zotify-MacOS-Music-Manager" && \
+  git branch --show-current && \
+  git rev-parse HEAD && \
+  PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --test
 ```
 
-Use a new path if that checkout already exists; don't overwrite it. On an
-unmerged review, use the PR branch shown above rather than the older default
-branch. Homebrew's prefix is discovered instead of assuming Intel `/usr/local`
-or Apple Silicon `/opt/homebrew`.
+The active branch is `main`; `release/macos-compat-setup` is no longer available.
+If cloning fails, stop instead of continuing with the later `cd` or setup
+commands. Use a new empty path if the destination already exists. Homebrew's
+prefix is discovered instead of assuming Intel `/usr/local` or Apple Silicon
+`/opt/homebrew`.
 
 The macOS-only script resolves its own checkout root, creates `.venv`, upgrades
 its packaging tools, installs the declared requirements, runs `pip check` and
@@ -38,6 +39,33 @@ environment created by this script in this same checkout. Symlinks, unknown venv
 and moved checkouts are refused. Preserve an old environment rather than deleting
 it to work around the guard; use a new checkout instead. `--update` is not
 `git pull`, and dependency ranges are not a reproducible full lockfile.
+
+## Updating an existing checkout
+
+First confirm the checkout is clean and `origin` is the manager repository. Stop
+if there are local changes or if the remote URL is not the expected one:
+
+```zsh
+cd "$HOME/Zotify-MacOS-Music-Manager" && \
+  git status --short --branch && \
+  git remote get-url origin
+```
+
+After confirming a clean tree and remote
+`https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git`, update the
+checkout and then its setup-managed venv:
+
+```zsh
+git fetch origin && \
+  git switch main && \
+  git pull --ff-only origin main && \
+  PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --update --test
+```
+
+The Git commands update source; the setup command reinstalls requirements and
+runs the offline tests. Neither operation migrates OAuth tokens or changes music
+files. If setup refuses the venv, use a separate empty checkout rather than
+removing the setup guard.
 
 ## 2. Verify without touching accounts or music
 

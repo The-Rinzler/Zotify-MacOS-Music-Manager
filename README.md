@@ -38,16 +38,16 @@ add a universal `--dry-run` or a library-root CLI option.
 Install [Homebrew](https://brew.sh/) if needed, then:
 
 ```zsh
-brew install python@3.11 git
-git clone --branch release/macos-compat-setup https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git "$HOME/Zotify-MacOS-Music-Manager"
-cd "$HOME/Zotify-MacOS-Music-Manager"
-PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --test
+brew install python@3.11 git && \
+  git clone --branch main https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git "$HOME/Zotify-MacOS-Music-Manager" && \
+  cd "$HOME/Zotify-MacOS-Music-Manager" && \
+  PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --test
 ```
 
-Use a new clone path if the directory exists. This command selects the release
-review branch; the default branch may not contain this setup until its PR merges.
-Zotify's own venv and FFmpeg setup are separate—do not install both projects into
-one production venv.
+The active branch is `main`; `release/macos-compat-setup` is no longer available.
+If `git clone` fails, stop there—don't continue with `cd` or setup commands. Use a
+new empty clone path if the destination already exists. Zotify's own venv and
+FFmpeg setup are separate; do not install both projects into one production venv.
 
 The script creates this checkout's `.venv`, installs `requirements.txt`, checks
 dependencies and imports, and optionally runs offline tests. It clears inherited
@@ -55,10 +55,38 @@ dependencies and imports, and optionally runs offline tests. It clears inherited
 interactive tools, edit `.zshrc`, or migrate existing venvs or music. Python 3.11
 is recommended; code requires 3.10+. Dependencies are bounded, not fully locked.
 
-Existing `.venv`? Setup stops without changing it. `--update` reuses only a venv
-created by this setup script in this exact checkout; it does not pull Git updates.
-See [INSTALLATION.md](INSTALLATION.md) for the older `.venv-test` bootstrap and
-rollback.
+An existing `.venv` is left untouched unless you use `--update`. That option
+reuses only a venv created by this setup script in this exact checkout; it does
+not pull Git changes. Use the update steps below to update both source and venv.
+
+## Update an existing checkout
+
+First confirm this is the manager checkout, that `origin` is the expected URL,
+and that you have no uncommitted work. If the status is dirty, stop and preserve
+your changes before updating. Run the preflight:
+
+```zsh
+cd "$HOME/Zotify-MacOS-Music-Manager" && \
+  git status --short --branch && \
+  git remote get-url origin
+```
+
+After confirming the remote is
+`https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git` and the working
+tree is clean, update the checkout and its managed environment:
+
+```zsh
+git fetch origin && \
+  git switch main && \
+  git pull --ff-only origin main && \
+  PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --update --test
+```
+
+`git fetch`/`git pull` update source; `setup_macos.sh --update` reinstalls the
+declared dependencies and verifies the venv. It does not migrate Spotify tokens,
+edit shell configuration, or change music files. If the setup refuses the venv,
+don't delete or reuse it blindly; follow [INSTALLATION.md](INSTALLATION.md) and
+use a separate checkout/environment.
 
 ## Spotify authentication
 
