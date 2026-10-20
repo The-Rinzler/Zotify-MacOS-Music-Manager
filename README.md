@@ -101,8 +101,44 @@ cache `~/.cache-spotipy`.
 Follow [the full key/authentication guide](docs/AUTHENTICATION.md) for safe secret
 entry, optional private config storage, browser consent and isolated cache tests.
 A developer app does not replace Zotify's Login5 authentication. Don't share the
-two projects' credential files. No keys or live account are needed for setup or
-unit tests.
+two projects' credential files or copy them into this repository. No keys or live
+account are needed for setup or unit tests.
+
+### Lyrics authentication (separate from playlist OAuth)
+
+Lyrics backfill reuses the **existing Zotify v0.21.0 Login5 session**, not the
+manager's Spotipy developer-app token. This matches Zotify's lyrics path
+(`choose_token(force_login5=True)`) and uses only Spotify's `color-lyrics/v2`
+endpoint. No external lyrics provider or new developer-app key is needed.
+
+The manager launches a read-only helper in Zotify's own venv so the two projects'
+dependencies stay separate. It reads Zotify's saved credentials, obtains a session
+access token, and keeps that token briefly in memory only. It never prompts for
+login, opens a browser, copies credentials, or writes Zotify config/cache/logs.
+Sign in with Zotify itself first; an OAuth-only Zotify credential file is not a
+Login5 session and is reported rather than used as a fallback.
+
+Sibling/home `zotify/.venv/bin/python` and `Zotify/.venv/bin/python` are discovered
+automatically. For a different Zotify environment, set its exact interpreter:
+
+```zsh
+export ZOTIFY_PYTHON="$HOME/venvs/zotify-dev/bin/python"
+# Or pass --zotify-python /path/to/zotify/.venv/bin/python to playlist_extractor.py.
+```
+
+By default the helper reads Zotify's platform config (on macOS,
+`~/Library/Application Support/Zotify/config.json`) and its `CREDENTIALS_LOCATION`,
+or the default `credentials.json` next to that config. If your Zotify command
+uses custom locations, pass the same locations with
+`--zotify-config-location` / `--zotify-credentials-location` (or
+`ZOTIFY_CONFIG_LOCATION` / `ZOTIFY_CREDENTIALS_LOCATION`). Do not point these at
+the manager's Spotipy cache. Token acquisition is lazy: no session is opened when
+all matched files already have lyrics. `--no-lyrics-backfill` disables it.
+
+An HTTP **401/403** now reports the exact status, Zotify session provider and
+track ID, then aborts the lyrics pass; this is **not** a missing-lyrics result.
+Even a valid session may be denied by Spotify; this integration does not bypass
+endpoint/account restrictions. HTTP 429 remains a rate-limit failure.
 
 ## Library locations and first run
 

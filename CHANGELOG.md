@@ -20,6 +20,12 @@ publish an independent Python package version; identify source by Git commit.
   and generated library files.
 
 ### Changed
+- Missing-lyrics backfill now obtains its token from Zotify v0.21.0’s saved
+  Login5 session in a separate Python environment, matching Zotify’s forced-Login5
+  lyrics path instead of sending the playlist-only Spotipy bearer. No credentials
+  are copied or written; config/credential/interpreter overrides are supported.
+- Lyrics authorization errors now distinguish HTTP 401 from 403 and identify
+  the provider/track without printing tokens or server response bodies.
 - README documents the real fixed home-relative library paths, mutating
   maintenance behavior, separate downloader venv and authorization boundaries.
 - Setup clears inherited `PYTHONPATH`/`PYTHONHOME`; operational commands no longer

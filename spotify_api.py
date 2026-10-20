@@ -109,7 +109,7 @@ def parse_spotify_lyrics(payload: Optional[dict]) -> Tuple[bool, str]:
 
 def fetch_track_lyrics(
     track_id: str,
-    bearer_token: str,
+    bearer_token: Union[str, Callable[[], str]],
     *,
     http_get: Optional[Callable] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -130,8 +130,9 @@ def fetch_track_lyrics(
 
         http_get = requests.get
 
+    token = bearer_token() if callable(bearer_token) else bearer_token
     headers = {
-        "Authorization": f"Bearer {bearer_token}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Accept-Language": "en",
         "app-platform": "WebPlayer",
@@ -164,7 +165,7 @@ def fetch_track_lyrics(
             # the track simply has no lyrics in Spotify's catalogue.
             return LYRICS_UNAVAILABLE, ""
         if status_code in (401, 403):
-            return LYRICS_AUTH_ERROR, ""
+            return LYRICS_AUTH_ERROR, f"HTTP {status_code}"
         if status_code == 404:
             return LYRICS_UNAVAILABLE, ""
         if status_code == 429:

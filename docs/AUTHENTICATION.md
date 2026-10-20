@@ -1,16 +1,25 @@
 # Spotify Developer app and browser authentication (macOS)
 
-The manager uses Spotipy's Authorization Code flow. It needs your own
-**Client ID + Client Secret**, an exact redirect registration, and consent from
-the Spotify account whose playlists you use. It requests `playlist-read-private`.
-It does not download audio or use Zotify's Login5 credential file. The playlist
-extractor also tries missing-lyrics backfill through Spotify's undocumented
-`spclient.wg.spotify.com/color-lyrics/v2/track/{id}` endpoint, following Zotify's
-approach; it uses the already-authorized Spotipy bearer token and no external
-lyrics service. This endpoint is not part of the supported Web API, so playlist
-access does not guarantee lyrics access. A 401/403 aborts backfill for that run;
-`--no-lyrics-backfill` disables it. Live endpoint authorization must be verified
-separately from offline tests.
+The manager uses Spotipy's Authorization Code flow for **playlist metadata**. It
+needs your own **Client ID + Client Secret**, an exact redirect registration, and
+consent from the Spotify account whose playlists you use. It requests
+`playlist-read-private` and does not download audio.
+
+Lyrics backfill is authenticated separately: a read-only helper uses **Zotify
+v0.21.0's saved Login5 session in Zotify's own Python environment**, matching
+Zotify's forced-Login5 lyrics path. It does not send the playlist-only Spotipy
+bearer, copy credential files, or write Zotify config/cache/logs. Sign in using
+Zotify itself first. An OAuth-only Zotify credential file is not a Login5 session
+and is reported rather than used as a fallback. See
+[lyrics authentication](../README.md#lyrics-authentication-separate-from-playlist-oauth)
+for interpreter discovery and custom config/credential path overrides.
+
+The only lyrics endpoint used is Spotify's undocumented
+`spclient.wg.spotify.com/color-lyrics/v2/track/{id}`; no external lyrics service is
+used. This is not part of the supported Web API, so playlist access does not
+guarantee lyrics access. A 401/403 reports the exact status and track and aborts
+backfill for that run; `--no-lyrics-backfill` disables it. Live authorization must
+be verified separately from offline tests.
 
 ## 1. Create or configure your app
 
