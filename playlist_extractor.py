@@ -6,7 +6,7 @@ import spotipy
 import unicodedata
 from spotipy.oauth2 import SpotifyOAuth
 from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3NoHeaderError
+from mutagen.id3 import ID3, ID3NoHeaderError
 from pathlib import Path
 import shutil
 import time
@@ -51,6 +51,119 @@ def get_playlist_url():
 
 def _nfc(value: str) -> str:
     return unicodedata.normalize("NFC", value or "")
+
+
+LYRIC_TIMESTAMP_RE = re.compile(
+    r"(?m)^[ \t]*(?:\[\d+:\d{2}(?:[.,]\d{1,3})?\][ \t]*)+"
+)
+
+
+def strip_lyric_timestamps(lyrics: str) -> str:
+    """Remove leading LRC timestamps while preserving lyric text and line breaks."""
+    return LYRIC_TIMESTAMP_RE.sub("", lyrics)
+
+
+def clean_embedded_lyrics(file_path: str) -> str:
+    """Strip LRC timestamps from MP3 USLT frames without changing other tags."""
+    try:
+        tags = ID3(file_path)
+    except ID3NoHeaderError:
+        return "missing"
+
+    lyric_frames = tags.getall("USLT")
+    if not any(frame.text.strip() for frame in lyric_frames):
+        return "missing"
+
+    changed = False
+    for frame in lyric_frames:
+        cleaned = strip_lyric_timestamps(frame.text)
+        if cleaned != frame.text:
+            frame.text = cleaned
+            changed = True
+
+    if not changed:
+        return "already_plain"
+    if tags.version[1] not in (3, 4):
+        return "unsupported_version"
+
+    # Mutagen removes existing ID3v1 trailers with v1=0; restore them verbatim.
+    id3v1_tag = None
+    with open(file_path, "rb") as audio_file:
+        audio_file.seek(0, os.SEEK_END)
+        if audio_file.tell() >= 128:
+            audio_file.seek(-128, os.SEEK_END)
+            trailer = audio_file.read(128)
+            if trailer.startswith(b"TAG"):
+                id3v1_tag = trailer
+
+    tags.save(file_path, v1=0, v2_version=tags.version[1])
+    if id3v1_tag is not None:
+        with open(file_path, "ab") as audio_file:
+            audio_file.write(id3v1_tag)
+    return "cleaned"
+
+
+def clean_playlist_lyrics(
+    playlist_dir: str, track_metadata: list[tuple[str, str, str]]
+) -> dict[str, int]:
+    """Clean lyrics in matched playlist MP3s and report missing/unmatched tracks."""
+    stats = {
+        "cleaned": 0,
+        "already_plain": 0,
+        "missing": 0,
+        "unmatched": 0,
+        "unsupported_version": 0,
+        "errors": 0,
+    }
+    processed_paths = set()
+    playlist_root = Path(playlist_dir).resolve()
+
+    for _, original_file_name, _ in track_metadata:
+        file_path = None
+        for possible_file_name in get_possible_filenames(original_file_name):
+            try:
+                candidate_path = (playlist_root / possible_file_name).resolve()
+                candidate_path.relative_to(playlist_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if candidate_path.is_file():
+                file_path = str(candidate_path)
+                break
+
+        if file_path is None:
+            stats["unmatched"] += 1
+            continue
+
+        normalized_path = os.path.abspath(file_path)
+        if normalized_path in processed_paths:
+            continue
+        processed_paths.add(normalized_path)
+
+        try:
+            status = clean_embedded_lyrics(file_path)
+        except Exception as error:
+            stats["errors"] += 1
+            CustomPrint.bold_print(
+                f"!!! ERROR: Unable to clean embedded lyrics for {os.path.basename(file_path)}: {error}",
+                "RED",
+            )
+            continue
+
+        stats[status] += 1
+        if status == "cleaned":
+            CustomPrint.bold_print(
+                f">>> Removed timestamps from embedded lyrics: {os.path.basename(file_path)}"
+            )
+        elif status == "missing":
+            CustomPrint.bold_print(
+                f">>> No embedded lyrics found: {os.path.basename(file_path)}"
+            )
+        elif status == "unsupported_version":
+            CustomPrint.bold_print(
+                f">>> Skipped embedded lyrics with unsupported ID3 version: {os.path.basename(file_path)}"
+            )
+
+    return stats
 
 
 def extract_playlist_tracks(items: list[dict]) -> list[dict]:
@@ -1181,6 +1294,17 @@ if __name__ == "__main__":
         # Print final message only if tags were updated
         if tags_updated:
             CustomPrint.bold_print("*** MP3 tag updating process completed. \n", "GREEN")
+
+        lyrics_stats = clean_playlist_lyrics(playlist_dir, track_metadata)
+        CustomPrint.bold_print(
+            "*** Embedded lyrics cleanup: "
+            f"timestamps removed={lyrics_stats['cleaned']}, "
+            f"already plain={lyrics_stats['already_plain']}, "
+            f"no lyrics={lyrics_stats['missing']}, "
+            f"unmatched={lyrics_stats['unmatched']}, "
+            f"unsupported version={lyrics_stats['unsupported_version']}, "
+            f"errors={lyrics_stats['errors']}."
+        )
 
 
 
