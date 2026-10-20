@@ -1,0 +1,22 @@
+# All shell commands are static; no PR metadata or secret values are interpolated.
+name: macOS offline tests
+on:
+  pull_request:
+  push:
+    branches: [release/macos-compat-setup]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Create project venv and run offline tests
+        env:
+          PYTHON: python3
+        run: bash scripts/setup_macos.sh --test

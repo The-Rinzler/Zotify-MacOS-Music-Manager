@@ -11,6 +11,7 @@ class CustomPrint:
     GREEN = "\033[32m"
     RED = "\033[31m"
     PURPLE = "\033[35m"
+    YELLOW = "\033[33m"
 
     @staticmethod
     def format(text: str, *styles: str) -> str:
@@ -173,7 +174,7 @@ def write_playlist_to_m3u8(tracks, output_file: str):
     track_metadata = []
     with open(output_file, 'w', encoding='utf-8') as f:
         for item in tracks:
-            track = item.get('track')
+            track = item.get('item') or item.get('track')
             if track and track.get('artists'):
                 artist = track['artists'][0]['name']
             else:
@@ -237,101 +238,4 @@ def get_possible_filenames(file_name: str) -> set[str]:
     possible_filenames.add(file_name)
 
     return possible_filenames
-
-
-def rename_and_cleanup(playlist_dir, expected_names):
-    """
-    First renames files in playlist_dir so that if sanitizing them yields a name
-    that exists in expected_names, they get renamed accordingly.
-    Then, it removes any file whose name does not exactly match any name in expected_names.
-
-    Args:
-        playlist_dir (str): The directory containing the music files.
-        expected_names (set): A set of expected filenames (as read from the .m3u file).
-    """
-    # Step 1: Rename files that could be fixed by sanitization
-    for file in os.listdir(playlist_dir):
-        file_path = os.path.join(playlist_dir, file)
-        if os.path.isfile(file_path):
-            if file not in expected_names:
-                sanitized = sanitize_filename(file)
-                # If sanitizing produces a name that is expected, then rename.
-                if sanitized in expected_names:
-                    new_path = os.path.join(playlist_dir, sanitized)
-                    # If the file's name is already correct after sanitization, skip.
-                    if file != sanitized:
-                        if not os.path.exists(new_path):
-                            os.rename(file_path, new_path)
-                            print(f"Renamed '{file}' -> '{sanitized}'")
-                        else:
-                            # If a file with the sanitized name already exists, remove the duplicate.
-                            os.remove(file_path)
-                            print(f"Duplicate found. Removed '{file}'")
-
-    # Step 2: Remove any file that does not exactly match an expected filename.
-    for file in os.listdir(playlist_dir):
-        file_path = os.path.join(playlist_dir, file)
-        if os.path.isfile(file_path) and file not in expected_names:
-            os.remove(file_path)
-            x = print(f"Removed file: '{file}'")
-
-
-# Example usage:
-# Assume that 'expected_names' is a set of filenames from your .m3u file.
-# For example:
-# with open(m3u_file, 'r', encoding='utf-8') as f:
-#     expected_names = {line.strip() for line in f if line.strip()}
-#
-# playlist_dir = "/path/to/playlist/directory"
-# rename_and_cleanup(playlist_dir, expected_names)
-
-def check_missing_songs_in_playlists(consolidated_library_dir, local_files_dir):
-    """
-    For each .m3u playlist file in consolidated_library_dir, check that every song listed is
-    present either in the corresponding playlist folder (downloaded) or in local_files_dir.
-    Uses get_possible_filenames to account for filename variants.
-
-    Returns:
-        A dict mapping the .m3u filename to a set of missing songs.
-    """
-    missing_songs_in_playlists = {}
-
-    # Iterate over each .m3u file in the consolidated library.
-    for playlist in os.listdir(consolidated_library_dir):
-        if not playlist.endswith('.m3u'):
-            continue
-
-        m3u_path = os.path.join(consolidated_library_dir, playlist)
-
-        # Read the playlist file (ignore empty lines and comments)
-        with open(m3u_path, 'r', encoding='utf-8') as f:
-            lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-
-        # Here we assume each valid line represents the original song filename.
-        track_references = lines
-
-        # The downloaded songs are assumed to be in a folder named after the playlist (without .m3u)
-        playlist_folder = os.path.join(consolidated_library_dir, os.path.splitext(playlist)[0])
-        downloaded_files = set(os.listdir(playlist_folder)) if os.path.isdir(playlist_folder) else set()
-
-        # Gather all local files (assumed to be .mp3 files) from the local files directory.
-        songs_in_local_files = set()
-        for root, dirs, files in os.walk(local_files_dir):
-            for file in files:
-                if file.endswith('.mp3'):
-                    songs_in_local_files.add(file)
-
-        # Now, for each song in the playlist, check if any possible filename is found
-        missing = set()
-        for original_song in track_references:
-            possible_names = get_possible_filenames(original_song)
-            # If none of the variants is found in the downloaded folder or local files, mark as missing.
-            if not any(fname in downloaded_files for fname in possible_names) and \
-                    not any(fname in songs_in_local_files for fname in possible_names):
-                missing.add(original_song)
-
-        if missing:
-            missing_songs_in_playlists[playlist] = missing
-
-    return missing_songs_in_playlists
 

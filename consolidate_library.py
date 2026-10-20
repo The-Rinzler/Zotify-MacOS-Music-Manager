@@ -25,7 +25,7 @@ Usage:
 Ensure your Spotify API credentials (SPOTIPY_CLIENT_ID,
 SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI) are set in your
 environment. The default redirect URI used here is
-``http://127.0.0.1:8888/callback`` which must match the settings in
+``http://127.0.0.1:9090`` which must match the settings in
 your Spotify Developer Dashboard.
 """
 

@@ -31,6 +31,7 @@ import re
 import shutil
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Union
 
@@ -331,18 +332,21 @@ def copy_file_if_newer(src_file: Path, dest_file: Path) -> None:
 
 
 def process_m3u_file(src_file: Path, dest_file: Path) -> None:
-    """Sanitize and copy an M3U8 file.
+    """Copy an M3U8 playlist into the flattened consolidated library.
 
-    The source file is read line by line.  Lines beginning with ``#`` are
-    written verbatim.  Other lines (which are assumed to contain file
-    references) are stripped, sanitized via ``sanitize_filename`` and
-    written to ``dest_file``.
+    Directives such as ``#EXTINF`` are preserved.  Local file references are
+    reduced to their filename because :func:`consolidate_library` stores audio
+    files in a single destination directory, then sanitized using the same
+    rule as the copied audio file.
     """
-    with open(src_file, 'r') as f_in, open(dest_file, 'w') as f_out:
+    with open(src_file, 'r', encoding='utf-8-sig') as f_in, open(
+        dest_file, 'w', encoding='utf-8'
+    ) as f_out:
         for line in f_in:
-            if not line.startswith("#"):
-                sanitized_line = sanitize_filename(line.strip())
-                f_out.write(f"{sanitized_line}\n")
+            song_ref = line.strip()
+            if song_ref and not song_ref.startswith("#"):
+                flattened_name = sanitize_filename(Path(song_ref).name)
+                f_out.write(f"{flattened_name}\n")
             else:
                 f_out.write(line)
 
@@ -351,9 +355,10 @@ def consolidate_library(src_dirs: List[str], dest_dir: str) -> None:
     """Consolidate music from ``src_dirs`` into ``dest_dir``.
 
     For each source directory, all ``.mp3`` files are copied (with
-    name sanitization) to ``dest_dir`` and any ``.m3u8`` playlists are
-    sanitized and copied verbatim.  The destination directory and any
-    necessary parent directories are created on the fly.
+    name sanitization) to ``dest_dir``.  Any ``.m3u8`` playlists are copied
+    with their directives preserved and local song references flattened to
+    the sanitized filenames in ``dest_dir``.  The destination directory and
+    any necessary parent directories are created on the fly.
     """
     dest_path = Path(dest_dir)
     dest_path.mkdir(parents=True, exist_ok=True)
@@ -373,21 +378,20 @@ def consolidate_library(src_dirs: List[str], dest_dir: str) -> None:
 # Playlist and library analysis helpers
 
 def get_valid_songs_from_m3u(filepath: Union[str, Path]) -> List[str]:
-    """Return a list of unique, valid song references from an M3U8 file.
+    """Return unique local song references from an M3U/M3U8 file.
 
-    Empty lines and comments are ignored.  Extended M3U format (where
-    metadata lines begin with ``#EXTINF``) is handled by skipping
-    metadata lines and only capturing the file references.
+    M3U directives such as ``#EXTM3U`` and ``#EXTINF`` are comments, not
+    alternating records.  Ignore every comment line and retain the remaining
+    references in playlist order.  ``utf-8-sig`` also accepts playlists with
+    an optional UTF-8 byte-order mark.
     """
     path = Path(filepath)
-    with open(path, 'r', encoding='utf-8') as f:
-        lines = [line.strip() for line in f if line.strip()]
-    if not lines:
-        return []
-    if lines[0] == "#EXTM3U":
-        song_paths = [lines[i] for i in range(1, len(lines), 2)]
-    else:
-        song_paths = [line for line in lines if not line.startswith('#')]
+    with open(path, 'r', encoding='utf-8-sig') as f:
+        song_paths = [
+            line.strip()
+            for line in f
+            if line.strip() and not line.lstrip().startswith('#')
+        ]
     seen: Set[str] = set()
     unique_songs: List[str] = []
     for song in song_paths:
@@ -404,18 +408,17 @@ def count_songs_in_m3u(filepath: Union[str, Path]) -> int:
 
 def count_unique_songs_in_m3u(m3u_filepath: Union[str, Path]) -> int:
     """Return the number of unique song references in an M3U8 file."""
-    with open(m3u_filepath, 'r', encoding='utf-8') as f:
-        lines = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-    return len(set(lines))
+    return len(get_valid_songs_from_m3u(m3u_filepath))
 
 
 def check_missing_songs_in_playlists(m3u_dir: str, songs_dir: str) -> Dict[str, List[str]]:
     """Return a mapping of playlist filename to songs missing from the library.
 
     For each ``.m3u8`` file in ``m3u_dir``, this function compares the song
-    references listed in the playlist to the actual files present in
-    ``songs_dir``.  If any referenced songs are missing, they are collected
-    into a list keyed by the playlist filename.
+    references listed in the playlist to local files, resolving relative
+    references from the playlist's directory first and then from ``songs_dir``
+    for compatibility with path-only Manager playlists.  Missing references
+    are collected into a list keyed by the playlist filename.
     """
     missing_songs: Dict[str, List[str]] = {}
     for file in os.listdir(m3u_dir):
@@ -424,8 +427,18 @@ def check_missing_songs_in_playlists(m3u_dir: str, songs_dir: str) -> Dict[str, 
             valid_songs = get_valid_songs_from_m3u(m3u_path)
             missing: List[str] = []
             for song in valid_songs:
-                song_path = song if os.path.isabs(song) else os.path.join(songs_dir, song)
-                if not os.path.exists(song_path):
+                song_ref = Path(song).expanduser()
+                if song_ref.is_absolute():
+                    candidates = [song_ref]
+                else:
+                    # M3U references are relative to the playlist location.
+                    candidates = [Path(m3u_path).parent / song_ref]
+                    # Keep the old library-root lookup only for bare filenames
+                    # used by the Manager's path-only playlists.  Nested paths
+                    # always follow standard M3U playlist-relative semantics.
+                    if song_ref.parent == Path('.'):
+                        candidates.append(Path(songs_dir) / song_ref)
+                if not any(candidate.exists() for candidate in candidates):
                     missing.append(song)
             if missing:
                 missing_songs[file] = missing
@@ -611,7 +624,7 @@ def resize_album_cover(
     img: Image.Image, *, size: Tuple[int, int] = (1000, 1000)
 ) -> bytes:
     """Resize an image to the specified ``size`` and return the JPEG bytes."""
-    img_resized = img.convert("RGB").resize(size, Image.LANCZOS)
+    img_resized = img.convert("RGB").resize(size, Image.Resampling.LANCZOS)
     with io.BytesIO() as output:
         img_resized.save(output, format='JPEG', quality=100)
         return output.getvalue()

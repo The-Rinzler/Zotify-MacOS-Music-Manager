@@ -1,120 +1,151 @@
-# Zotify-macOS Music Manager
+# Zotify macOS Music Manager
 
-Works **with** my Zotify fork:  
-<https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod>  
+Playlist extraction and library maintenance for **macOS, Music.app and iPod**.
+Companion to [The-Rinzler's Zotify fork](https://github.com/The-Rinzler/zotify/tree/compat/macos-ipod-v0.21.0).
+This project manages files and Spotify playlist metadata; **Zotify is the separate
+music downloader**. It is not an Apple or Spotify product. Use only content you
+are authorized to access and follow the services' terms.
 
+[Installation and aliases](INSTALLATION.md) ·
+[Spotify app / authentication guide](docs/AUTHENTICATION.md) ·
+[Changelog](CHANGELOG.md)
 
+## What it does
 
-**Only tested for managing and downloading playlists.**
+- `playlist_extractor.py` reads a Spotify playlist, writes M3U8/hidden playlist
+  links, and reconciles existing audio with five-column `.song_ids` records.
+- `consolidate_library.py` refreshes playlist information, reconciles duplicates,
+  copies tracks into a flat Consolidated Library, reports missing/orphaned tracks,
+  offers cleanup, and resizes embedded artwork.
+- Supports Spotipy 2.26's current playlist `item` shape and the legacy `track`
+  shape, follows pagination beyond 50 items, and understands Zotify's extended
+  M3U8 metadata and playlist-relative paths.
+- Preserves the shared flat `First Artist - Title.mp3` naming contract. The
+  downloader keeps physical copies for overlapping playlist membership; ordinary
+  consolidation copies into its separate library rather than moving originals.
 
+**These are maintenance tools, not read-only viewers.** They can rename files and
+folders, rewrite playlists/archives and audio metadata, and offer deletion of
+leftovers. Back up your library and test on disposable copies before production
+use. Declining one prompt is not a general dry-run mode. This release does not
+add a universal `--dry-run` or a library-root CLI option.
 
+## Quick setup (macOS only)
 
-Workflow: you run these tools to build/maintain playlists and `.song_ids`, then run Zotify to download, then re-run `consolidate_library.py` to reconcile.
+Install [Homebrew](https://brew.sh/) if needed, then:
 
-
-
-## 1) What this project does
-
-- `playlist_extractor.py`: reads a Spotify playlist and updates your local playlist folder, `.m3u8`, and `.song_ids`.
-- `consolidate_library.py`: cleans old entries, fixes names, reconciles `.song_ids`, and reports drift.
-
-
-
-## 2) Prerequisites (fresh macOS)
-
-- Xcode Command Line Tools
-- Homebrew
-- Python 3.10–3.12 installed and on `PATH`  
-_Ensure those exist._
-
-
-
-## 3) Clone
-
-```bash
-git clone https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git ~/Zotify-MacOS-Music-Manager
-cd ~/Zotify-MacOS-Music-Manager
+```zsh
+brew install python@3.11 git
+git clone --branch release/macos-compat-setup https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager.git "$HOME/Zotify-MacOS-Music-Manager"
+cd "$HOME/Zotify-MacOS-Music-Manager"
+PYTHON="$(brew --prefix python@3.11)/bin/python3.11" bash scripts/setup_macos.sh --test
 ```
 
+Use a new clone path if the directory exists. This command selects the release
+review branch; the default branch may not contain this setup until its PR merges.
+Zotify's own venv and FFmpeg setup are separate—do not install both projects into
+one production venv.
 
-## 4) Virtual environment
+The script creates this checkout's `.venv`, installs `requirements.txt`, checks
+dependencies and imports, and optionally runs offline tests. It clears inherited
+`PYTHONPATH`/`PYTHONHOME`. It **does not** open Spotify, request keys, run the
+interactive tools, edit `.zshrc`, or migrate existing venvs or music. Python 3.11
+is recommended; code requires 3.10+. Dependencies are bounded, not fully locked.
 
-```bash
-python3 -m venv ~/venvs/playlist-tools
-~/venvs/playlist-tools/bin/python -m pip install -U pip wheel
-# minimal deps
-~/venvs/playlist-tools/bin/python -m pip install spotipy mutagen requests tabulate Pillow
+Existing `.venv`? Setup stops without changing it. `--update` reuses only a venv
+created by this setup script in this exact checkout; it does not pull Git updates.
+See [INSTALLATION.md](INSTALLATION.md) for the older `.venv-test` bootstrap and
+rollback.
+
+## Spotify authentication
+
+Create your own app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+The manager needs **Client ID and Client Secret** and the exact registered
+redirect `http://127.0.0.1:9090`. Set `SPOTIPY_CLIENT_ID`,
+`SPOTIPY_CLIENT_SECRET` and `SPOTIPY_REDIRECT_URI` in the invoking shell.
+The scripts request `playlist-read-private` and normally share the local token
+cache `~/.cache-spotipy`.
+
+Follow [the full key/authentication guide](docs/AUTHENTICATION.md) for safe secret
+entry, optional private config storage, browser consent and isolated cache tests.
+A developer app does not replace Zotify's Login5 authentication. Don't share the
+two projects' credential files. No keys or live account are needed for setup or
+unit tests.
+
+## Library locations and first run
+
+The interactive scripts currently use these **fixed home-relative paths**:
+
+| Path | Purpose |
+| --- | --- |
+| `~/Music/Zotify Music` | Zotify's per-playlist library |
+| `~/Music/Local Files` | Additional local audio for consolidation |
+| `~/Music/Consolidated Library` | Flat output library and playlists |
+| `~/.cache-spotipy` | Spotify OAuth cache, outside the repository |
+
+Match the downloader's production `ROOT_PATH` to `~/Music/Zotify Music` when
+cutting over. An arbitrary Zotify `--root-path` does not automatically reconfigure
+this manager. Complete the [isolated-home acceptance procedure](INSTALLATION.md#isolated-home-acceptance)
+before running the following against your real home:
+
+```zsh
+cd "$HOME/Zotify-MacOS-Music-Manager"
+env -u PYTHONPATH -u PYTHONHOME .venv/bin/python playlist_extractor.py 'https://open.spotify.com/playlist/PLAYLIST_ID'
+# Run Zotify separately in its own venv to fetch authorized missing audio.
+env -u PYTHONPATH -u PYTHONHOME .venv/bin/python consolidate_library.py
 ```
 
+Replace `PLAYLIST_ID`. Extraction can reuse already-downloaded tracks and reconcile
+archives; inspect prompts carefully. Consolidation can perform maintenance even
+if you decline Spotify refresh or copying. Do not run it on your only backup.
+Importing playlists into Music.app or syncing an iPod is a separate manual step;
+this project does not promise automatic device sync.
 
-## 5) Install requirements from requirements.txt
+## Optional `.zshrc` aliases
 
-```bash
-python -m pip install -r requirements.txt
+Back up `.zshrc`, inspect `type -a playlist_extractor consolidate_library`, then add
+these manually (adjust paths if you cloned elsewhere):
+
+```zsh
+alias playlist_extractor='(cd "$HOME/Zotify-MacOS-Music-Manager" && env -u PYTHONPATH -u PYTHONHOME .venv/bin/python playlist_extractor.py)'
+alias consolidate_library='(cd "$HOME/Zotify-MacOS-Music-Manager" && env -u PYTHONPATH -u PYTHONHOME .venv/bin/python consolidate_library.py)'
 ```
 
+`source ~/.zshrc`, then `type -a playlist_extractor consolidate_library`.
+These aliases use the exact project venv without activating it or leaking global
+Python packages. Use `playlist_extractor` with its interactive URL prompt; the
+[installation guide](INSTALLATION.md) includes a function for forwarding arguments.
+Do not invoke the maintenance alias merely to test that an alias exists.
 
-## 6) Spotify API credentials
+## Offline verification
 
-**6.1** Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-
-**6.2** Copy **Client ID** and **Client Secret**.  
-
-**6.3** Redirect URI must be exactly: `http://127.0.0.1:9090` _(the code expects this)_.  
-
-**6.4** Add environment variables to your shell profile:
-- **zsh** (default on modern macOS): add to `~/.zshrc`
-- **bash**: add to `~/.bash_profile` or `~/.bashrc`
-```bash
-export SPOTIPY_CLIENT_ID="your_client_id"
-export SPOTIPY_CLIENT_SECRET="your_client_secret"
-export SPOTIPY_REDIRECT_URI="http://127.0.0.1:9090"
-```
-Apply changes:
-```bash
-# zsh
-source ~/.zshrc
-# bash
-source ~/.bash_profile  # or ~/.bashrc
+```zsh
+cd "$HOME/Zotify-MacOS-Music-Manager"
+env -u PYTHONPATH -u PYTHONHOME .venv/bin/python -m unittest discover -s tests -v
 ```
 
+Tests use synthetic data and disposable directories. Setup safety tests simulate
+macOS tool orchestration; they do not prove native macOS installation or live
+Spotify authorization. A macOS GitHub Actions workflow runs the real setup and
+offline suite after publication, without account secrets. Live authorization,
+Spotify endpoint access and real-library behavior remain separate Mac checks.
 
-## 7) Run
+## Troubleshooting
 
-From the repo root:
-```bash
-cd ~/Zotify-MacOS-Music-Manager
-PYTHONPATH=. ~/venvs/playlist-tools/bin/python playlist_extractor.py
-PYTHONPATH=. ~/venvs/playlist-tools/bin/python consolidate_library.py
-```
+- **Wrong Python/imports:** use the full `.venv/bin/python` path and unset
+  `PYTHONPATH`/`PYTHONHOME`; don't use global `pip` or `PYTHONPATH=.`.
+- **Missing music directory:** create the intended test folders or check the
+  fixed paths before production. A missing source root is not an API failure.
+- **Invalid client / redirect mismatch / 401 / 403:** consult the auth guide;
+  check app credentials, exact redirect, authorized account and Dashboard limits.
+- **HTTP 429:** rate limited, not an empty playlist. Stop and honor retry/backoff;
+  do not repeatedly request a large library.
+- **Missing tracks:** an M3U8 entry is not proof the audio exists. Run the
+  downloader deliberately, then reconcile on a backed-up library.
 
+## Credits and licensing
 
-## 8) Using with Zotify (with fork)
-
-Run Zotify (separately, in its own venv if you prefer) **after** `playlist_extractor.py` finishes, then re-run `consolidate_library.py` to reconcile any new downloads.
-
-
-
-## 9) Optional aliases
-
-Place these **in the same shell profile** you edited above (`~/.zshrc` for zsh, or your bash profile). They:
-- `cd` into the repo,
-- run the scripts with the venv’s Python (no need to “activate”),
-- keep local imports working via `PYTHONPATH=.`,
-- effectively “execute the venv and run the command” in one step.
-```bash
-alias playlist_extractor='(cd "$HOME/Zotify-MacOS-Music-Manager" && PYTHONPATH=. "$HOME/venvs/playlist-tools/bin/python" playlist_extractor.py)'
-alias consolidate_library='(cd "$HOME/Zotify-MacOS-Music-Manager" && PYTHONPATH=. "$HOME/venvs/playlist-tools/bin/python" consolidate_library.py)'
-```
-Reload your shell, then run:
-```bash
-playlist_extractor
-consolidate_library
-```
-
-
-
-## 10) Common pitfalls on a fresh install
-- Missing env vars or wrong redirect URI → Spotipy `invalid_client`.
-- Running outside the repo without `PYTHONPATH=.` → `ModuleNotFoundError` for local modules.
-- Mixing system Python and venv Python → missing packages. Use the full venv path shown above.
+Maintained in [The-Rinzler/Zotify-MacOS-Music-Manager](https://github.com/The-Rinzler/Zotify-MacOS-Music-Manager).
+Uses Spotipy, Mutagen, Requests, Pillow and Tabulate. See the repository's
+[GNU General Public License v3.0](LICENSE). This separate project's license is
+not Zotify's Unlicense.

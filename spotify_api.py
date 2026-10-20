@@ -25,10 +25,9 @@ Functions
     ``playlist_extractor.py``.
 
 ``fetch_playlist_tracks``
-    Retrieve all items from a Spotify playlist.  Spotipy limits
-    playlist queries to 100 items per request; this helper handles
-    pagination transparently and matches the logic that existed in
-    multiple places in the original code base.
+    Retrieve all items from a Spotify playlist.  It follows Spotipy's
+    pagination links, which is required because the current Spotify API
+    limits playlist pages to 50 items.
 
 Note
 ----
@@ -124,13 +123,11 @@ def extract_playlist_id(playlist_url: str) -> str:
 def fetch_playlist_tracks(
     sp: spotipy.Spotify, playlist_id_or_url: str
 ) -> List[dict]:
-    """Return all track items from a playlist.
+    """Return all playlist items, following Spotify's pagination links.
 
-    Spotify's API returns playlists in pages of up to 100 items.  This function
-    retrieves each page sequentially until all items have been fetched.  It
-    deliberately mirrors the logic present in the original scripts to avoid any
-    behavioural differences.  The function accepts either a playlist ID or a full
-    playlist URL; in the latter case the ID is extracted internally.
+    The current API caps playlist pages at 50 items. Spotipy's ``next`` helper
+    follows the server-provided next-page URL, avoiding assumptions about page
+    length or offsets. The function accepts either a playlist ID or full URL.
 
     Parameters
     ----------
@@ -148,13 +145,10 @@ def fetch_playlist_tracks(
     playlist_id = extract_playlist_id(playlist_id_or_url)
 
     tracks: List[dict] = []
-    offset = 0
-    while True:
-        response = sp.playlist_items(playlist_id, offset=offset)
-        items = response.get("items") or []
-        tracks.extend(items)
-        # Stop when fewer than 100 items are returned; this matches Spotipy behaviour.
-        if len(items) < 100:
+    response = sp.playlist_items(playlist_id, limit=50, offset=0)
+    while response:
+        tracks.extend(response.get("items") or [])
+        if not response.get("next"):
             break
-        offset += len(items)
+        response = sp.next(response)
     return tracks
