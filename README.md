@@ -14,9 +14,10 @@ are authorized to access and follow the services' terms.
 
 - `playlist_extractor.py` reads a Spotify playlist, writes M3U8/hidden playlist
   links, reconciles audio with five-column `.song_ids` records, strips LRC
-  timestamps from embedded MP3 lyrics, and reports tracks without lyric tags.
-  It does not fetch lyrics; `.lrc` sidecars are left unchanged. ID3v2.2 files
-  are reported and left untouched to preserve their tag version.
+  timestamps from embedded MP3 lyrics, and backfills missing embedded lyrics
+  from Spotify's `color-lyrics/v2` endpoint. No external lyrics service is used;
+  `.lrc` sidecars are left unchanged. Use `--no-lyrics-backfill` to skip lookup.
+  ID3v2.2 files are reported and left untouched to preserve their tag version.
 - `consolidate_library.py` refreshes playlist information, reconciles duplicates,
   copies tracks into a flat Consolidated Library, reports missing/orphaned tracks,
   offers cleanup, and resizes embedded artwork.

@@ -6,7 +6,7 @@ import spotipy
 import unicodedata
 from spotipy.oauth2 import SpotifyOAuth
 from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3, ID3NoHeaderError
+from mutagen.id3 import ID3, ID3NoHeaderError, USLT
 from pathlib import Path
 import shutil
 import time
@@ -23,6 +23,10 @@ from spotify_api import (
     get_spotify_client,
     extract_playlist_id as sp_extract_playlist_id,
     fetch_playlist_tracks,
+    get_spotify_bearer_token,
+    fetch_track_lyrics,
+    LYRICS_OK,
+    LYRICS_AUTH_ERROR,
 )
 from song_ids_manager import (
     reconcile_song_ids_flip_ids as sid_reconcile_song_ids_flip_ids,
@@ -39,6 +43,11 @@ def get_playlist_url():
     """Get the playlist URL from command-line argument or prompt user."""
     parser = argparse.ArgumentParser(description="Extract and manage Spotify playlists.")
     parser.add_argument('playlist_url', nargs='?', help="Spotify playlist URL")
+    parser.add_argument(
+        '--no-lyrics-backfill',
+        action='store_true',
+        help="Skip embedding missing lyrics from Spotify into previously downloaded tracks",
+    )
     args = parser.parse_args()
 
     if args.playlist_url:
@@ -46,7 +55,7 @@ def get_playlist_url():
     else:
         playlist_url = input(CustomPrint.bold("### Enter your Spotify playlist URL: ", "PURPLE")).strip()
 
-    return playlist_url
+    return playlist_url, args
 
 
 def _nfc(value: str) -> str:
@@ -166,6 +175,212 @@ def clean_playlist_lyrics(
     return stats
 
 
+def build_playlist_track_ids(items: list[dict]) -> dict[str, str]:
+    """Map canonical playlist filenames to Spotify track IDs.
+
+    Uses the exact artist/title -> filename logic of write_playlist_to_m3u8 so
+    keys align with the original_file_name entries of track_metadata. Tracks
+    without an ID (local files) are skipped.
+    """
+    track_ids: dict[str, str] = {}
+    for entry in items:
+        track = (entry.get("item") or entry.get("track")) if isinstance(entry, dict) else None
+        if not track or not track.get("id"):
+            continue
+        if track.get("artists"):
+            artist = track["artists"][0]["name"]
+        else:
+            artist = "Unknown Artist"
+        title = track.get("name", "Unknown Title")
+        file_name = f"{sanitize_filename(f'{artist} - {title}')}.mp3"
+        track_ids.setdefault(file_name, track["id"])
+    return track_ids
+
+
+def file_lyrics_state(file_path: str) -> str:
+    """Classify embedded lyrics without modifying the file.
+
+    Returns 'missing' (no usable USLT, safe to embed), 'present' or
+    'unsupported_version' (ID3v2.2 or older). Files without any ID3 header
+    count as 'missing' - embed_lyrics_in_file writes a fresh tag for them.
+    """
+    try:
+        tags = ID3(file_path)
+    except ID3NoHeaderError:
+        return "missing"
+    if any(frame.text.strip() for frame in tags.getall("USLT")):
+        return "present"
+    if tags.version[1] not in (3, 4):
+        return "unsupported_version"
+    return "missing"
+
+
+def embed_lyrics_in_file(file_path: str, lyrics_text: str) -> str:
+    """Embed plain-text lyrics as an unsynchronised USLT frame.
+
+    Refuses to overwrite existing non-empty lyrics, keeps all other tags and
+    any ID3v1 trailer intact (same preservation rules as clean_embedded_lyrics).
+    """
+    state = file_lyrics_state(file_path)
+    if state == "present":
+        return "already_present"
+    if state == "unsupported_version":
+        return "unsupported_version"
+
+    try:
+        tags = ID3(file_path)
+        existing_version = tags.version[1]
+    except ID3NoHeaderError:
+        tags = ID3()
+        existing_version = 3  # write a v2.3 header on files that never had one
+
+    tags.delall("USLT")
+    tags.add(USLT(encoding=3, lang="und", desc="", text=lyrics_text))
+
+    # Mutagen removes existing ID3v1 trailers with v1=0; restore them verbatim.
+    id3v1_tag = None
+    with open(file_path, "rb") as audio_file:
+        audio_file.seek(0, os.SEEK_END)
+        if audio_file.tell() >= 128:
+            audio_file.seek(-128, os.SEEK_END)
+            trailer = audio_file.read(128)
+            if trailer.startswith(b"TAG"):
+                id3v1_tag = trailer
+
+    tags.save(file_path, v1=0, v2_version=existing_version)
+    if id3v1_tag is not None:
+        with open(file_path, "ab") as audio_file:
+            audio_file.write(id3v1_tag)
+    return "embedded"
+
+
+def backfill_playlist_lyrics(
+    playlist_dir: str,
+    track_metadata: list[tuple[str, str, str]],
+    track_ids: dict[str, str],
+    bearer_token: str,
+    *,
+    fetch=fetch_track_lyrics,
+    sleep=time.sleep,
+    delay_seconds: float = 0.35,
+    max_consecutive_errors: int = 3,
+) -> dict[str, int]:
+    """Fetch missing lyrics from Spotify and embed them into playlist MP3s.
+
+    Mirrors the file matching of clean_playlist_lyrics (stays inside the
+    playlist folder, dedupes by resolved path) and only ever writes files
+    whose lyrics are empty. Uses Zotify's color-lyrics endpoint via
+    fetch_track_lyrics; 'already_present' files are never touched.
+    """
+    stats = {
+        "embedded": 0,
+        "already_present": 0,
+        "unavailable": 0,
+        "no_track_id": 0,
+        "unmatched": 0,
+        "unsupported_version": 0,
+        "errors": 0,
+        "aborted": 0,
+    }
+    if not bearer_token:
+        stats["aborted"] = 1
+        return stats
+
+    processed_paths = set()
+    playlist_root = Path(playlist_dir).resolve()
+    consecutive_errors = 0
+
+    for _, original_file_name, _ in track_metadata:
+        file_path = None
+        for possible_file_name in get_possible_filenames(original_file_name):
+            try:
+                candidate_path = (playlist_root / possible_file_name).resolve()
+                candidate_path.relative_to(playlist_root)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if candidate_path.is_file():
+                file_path = str(candidate_path)
+                break
+
+        if file_path is None:
+            stats["unmatched"] += 1
+            continue
+
+        normalized_path = os.path.abspath(file_path)
+        if normalized_path in processed_paths:
+            continue
+        processed_paths.add(normalized_path)
+
+        try:
+            state = file_lyrics_state(file_path)
+        except Exception as error:
+            stats["errors"] += 1
+            CustomPrint.bold_print(
+                f"!!! ERROR: Unable to inspect embedded lyrics for {os.path.basename(file_path)}: {error}",
+                "RED",
+            )
+            continue
+
+        if state == "present":
+            stats["already_present"] += 1
+            continue
+        if state == "unsupported_version":
+            stats["unsupported_version"] += 1
+            continue
+
+        track_id = track_ids.get(original_file_name)
+        if not track_id:
+            stats["no_track_id"] += 1
+            continue
+
+        status, lyrics_text = fetch(track_id, bearer_token)
+        if status == LYRICS_AUTH_ERROR:
+            CustomPrint.bold_print(
+                "!!! Spotify rejected the OAuth token for lyrics lookup - "
+                "backfill aborted for this run.",
+                "RED",
+            )
+            stats["aborted"] = 1
+            break
+        if status == LYRICS_OK:
+            try:
+                result = embed_lyrics_in_file(file_path, lyrics_text)
+            except Exception as error:
+                stats["errors"] += 1
+                consecutive_errors += 1
+                CustomPrint.bold_print(
+                    f"!!! ERROR: Unable to embed lyrics for {os.path.basename(file_path)}: {error}",
+                    "RED",
+                )
+            else:
+                if result == "embedded":
+                    stats["embedded"] += 1
+                    consecutive_errors = 0
+                    CustomPrint.bold_print(
+                        f">>> Embedded Spotify lyrics: {os.path.basename(file_path)}"
+                    )
+                else:
+                    stats[result] += 1
+        elif status == "unavailable":
+            stats["unavailable"] += 1
+            consecutive_errors = 0
+        else:
+            stats["errors"] += 1
+            consecutive_errors += 1
+
+        if consecutive_errors >= max_consecutive_errors:
+            CustomPrint.bold_print(
+                "!!! Lyrics backfill aborted after repeated API failures - "
+                "will resume on the next run.",
+                "YELLOW",
+            )
+            stats["aborted"] = 1
+            break
+        sleep(delay_seconds)
+
+    return stats
+
+
 def extract_playlist_tracks(items: list[dict]) -> list[dict]:
     """Flatten playlist entries across Spotify's old and current response shapes."""
     extracted = []
@@ -211,7 +426,7 @@ def find_matching_playlist_dir(playlist_url: str, base_music_path: str) -> str |
 if __name__ == "__main__":
     try:
         # Get the playlist URL
-        playlist_url = get_playlist_url()
+        playlist_url, extractor_args = get_playlist_url()
 
 
         def clean_playlist_url(url):
@@ -1306,6 +1521,40 @@ if __name__ == "__main__":
             f"errors={lyrics_stats['errors']}."
         )
 
+        # Backfill: fetch missing lyrics from Spotify (same color-lyrics
+        # endpoint Zotify uses) and embed them into previously downloaded
+        # tracks that have no lyrics tag. Disabled with --no-lyrics-backfill.
+        if not extractor_args.no_lyrics_backfill:
+            CustomPrint.bold_print(
+                ">>> Backfilling missing embedded lyrics from Spotify...", "YELLOW"
+            )
+            lyrics_token = get_spotify_bearer_token(sp)
+            if lyrics_token:
+                backfill_stats = backfill_playlist_lyrics(
+                    playlist_dir,
+                    track_metadata,
+                    build_playlist_track_ids(tracks),
+                    lyrics_token,
+                )
+                CustomPrint.bold_print(
+                    "*** Lyrics backfill: "
+                    f"embedded={backfill_stats['embedded']}, "
+                    f"already present={backfill_stats['already_present']}, "
+                    f"not on Spotify={backfill_stats['unavailable']}, "
+                    f"no track id={backfill_stats['no_track_id']}, "
+                    f"unmatched={backfill_stats['unmatched']}, "
+                    f"unsupported version={backfill_stats['unsupported_version']}, "
+                    f"errors={backfill_stats['errors']}"
+                    + (", ABORTED" if backfill_stats["aborted"] else "")
+                    + ".",
+                    "GREEN" if not backfill_stats["aborted"] else "RED",
+                )
+            else:
+                CustomPrint.bold_print(
+                    "!!! Lyrics backfill skipped: no usable Spotify OAuth token "
+                    "(run the extractor once interactively to authorise).",
+                    "RED",
+                )
 
 
         def analyze_song_ids_file(playlist_dir: str) -> None:

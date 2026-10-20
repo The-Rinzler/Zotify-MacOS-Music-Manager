@@ -39,9 +39,150 @@ interactions remain in the scripts that import these functions.
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Union
+import time
+from typing import Callable, List, Optional, Tuple, Union
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+
+# Spotify's internal lyrics endpoint - the exact mechanism Zotify uses to fetch
+# lyrics (see zotify/const.py: LYRICS_URL and zotify/api.py: fetch_lyrics).
+# No external lyrics services (Genius/Musixmatch) are involved.
+LYRICS_URL = "https://spclient.wg.spotify.com/color-lyrics/v2/track/"
+
+# Result statuses returned by fetch_track_lyrics().
+LYRICS_OK = "ok"
+LYRICS_UNAVAILABLE = "unavailable"
+LYRICS_AUTH_ERROR = "auth_error"
+LYRICS_RATE_LIMITED = "rate_limited"
+LYRICS_ERROR = "error"
+
+
+def get_spotify_bearer_token(client: spotipy.Spotify) -> Optional[str]:
+    """Return the current OAuth access token of a Spotipy client.
+
+    Spotipy refreshes the cached user token transparently, so this reuses the
+    same developer-app credentials the playlist fetch already authenticated
+    with - mirroring Zotify's ``cls.OAUTH.token()`` branch in invoke_url().
+    Returns ``None`` when no usable token is available (e.g. headless run
+    without a token cache).
+    """
+    auth_manager = getattr(client, "auth_manager", None)
+    if auth_manager is None:
+        return None
+    try:
+        token_data = auth_manager.get_access_token(as_dict=False)
+    except TypeError:  # older Spotipy signatures do not accept as_dict
+        try:
+            token_data = auth_manager.get_access_token()
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if isinstance(token_data, str):
+        return token_data or None
+    return (token_data or {}).get("access_token") or None
+
+
+def parse_spotify_lyrics(payload: Optional[dict]) -> Tuple[bool, str]:
+    """Extract plain-text lyrics from a color-lyrics/v2 JSON payload.
+
+    Returns (found, text). Both UNSYNCED and LINE_SYNCED payloads are
+    accepted; only the text of every line is kept, timestamps are dropped on
+    purpose so the embedded USLT frame stays clean for Music.app/iPod (the
+    playlist extractor additionally strips LRC timestamps from legacy tags).
+    """
+    if not isinstance(payload, dict):
+        return False, ""
+    lyrics = payload.get("lyrics")
+    if not isinstance(lyrics, dict):
+        return False, ""
+    lines = lyrics.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return False, ""
+    text = "\n".join(
+        str(line.get("words", "")) for line in lines if isinstance(line, dict)
+    )
+    if not text.strip():
+        return False, ""
+    return True, text
+
+
+def fetch_track_lyrics(
+    track_id: str,
+    bearer_token: str,
+    *,
+    http_get: Optional[Callable] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    retry_attempts: int = 3,
+    timeout: float = 15.0,
+) -> Tuple[str, str]:
+    """Fetch Spotify lyrics for a track ID the way Zotify does.
+
+    Calls ``color-lyrics/v2/track/{id}`` with the same headers Zotify's
+    ``invoke_url()`` sends. Returns ``(status, text)`` where status is one of
+    ``LYRICS_OK`` (text holds plain lyrics), ``LYRICS_UNAVAILABLE`` (track has
+    no lyrics - normal, not every song does), ``LYRICS_AUTH_ERROR`` (token was
+    rejected; retrying other tracks will not help), ``LYRICS_RATE_LIMITED`` or
+    ``LYRICS_ERROR`` (transient; safe to retry later).
+    """
+    if http_get is None:
+        import requests
+
+        http_get = requests.get
+
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "Accept": "application/json",
+        "Accept-Language": "en",
+        "app-platform": "WebPlayer",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) "
+            "Gecko/20100101 Firefox/136.0"
+        ),
+    }
+
+    backoffs = [2.0, 5.0, 10.0]
+    for attempt in range(retry_attempts + 1):
+        try:
+            response = http_get(LYRICS_URL + track_id, headers=headers, timeout=timeout)
+        except Exception:
+            if attempt >= retry_attempts:
+                return LYRICS_ERROR, ""
+            sleep(backoffs[min(attempt, len(backoffs) - 1)])
+            continue
+
+        status_code = getattr(response, "status_code", 0)
+        if status_code == 200:
+            try:
+                payload = response.json()
+            except Exception:
+                return LYRICS_ERROR, ""
+            found, text = parse_spotify_lyrics(payload)
+            if found:
+                return LYRICS_OK, text
+            # 200 with no usable payload, or empty/None lyrics object:
+            # the track simply has no lyrics in Spotify's catalogue.
+            return LYRICS_UNAVAILABLE, ""
+        if status_code in (401, 403):
+            return LYRICS_AUTH_ERROR, ""
+        if status_code == 404:
+            return LYRICS_UNAVAILABLE, ""
+        if status_code == 429:
+            if attempt >= retry_attempts:
+                return LYRICS_RATE_LIMITED, ""
+            retry_after = 0.0
+            try:
+                retry_after = float(dict(getattr(response, "headers", {}) or {}).get("Retry-After", 0))
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            sleep(max(retry_after, backoffs[min(attempt, len(backoffs) - 1)]))
+            continue
+        if 500 <= status_code < 600 and attempt < retry_attempts:
+            sleep(backoffs[min(attempt, len(backoffs) - 1)])
+            continue
+        return LYRICS_ERROR, ""
+
+    return LYRICS_ERROR, ""
 
 
 def get_spotify_client(

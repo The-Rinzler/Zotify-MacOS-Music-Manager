@@ -7,9 +7,10 @@ publish an independent Python package version; identify source by Git commit.
 
 ### Added
 - `playlist_extractor.py` strips leading LRC timestamps from embedded MP3 lyrics,
-  reports tracks without lyrics, preserves other ID3 tags, and leaves `.lrc`
-  sidecars unchanged; no lyrics are fetched. ID3v2.2 files are reported and left
-  untouched to preserve their tag version.
+  then fetches missing lyrics from Spotify's `color-lyrics/v2` endpoint and embeds
+  them without replacing existing lyrics or other ID3 tags. No external lyrics
+  service is used; `.lrc` sidecars stay unchanged. `--no-lyrics-backfill` skips
+  fetching. ID3v2.2 files are reported and left untouched.
 - Guarded project-local `.venv` setup for macOS (`scripts/setup_macos.sh`), with
   interpreter selection, optional offline tests and explicit `--update` reuse.
 - Setup orchestration safety tests and a macOS GitHub Actions offline-test job.
