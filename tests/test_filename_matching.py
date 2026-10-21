@@ -85,6 +85,36 @@ class FilenameMatchingTests(unittest.TestCase):
         self.assertEqual(rows[0].split("\t")[0], track_id)
         self.assertEqual(rows[0].split("\t")[4], sorted(variants)[0])
 
+    def test_reconciliation_archives_sanitized_punctuation_filenames(self):
+        tracks = [
+            {"id": "01TuObJVd7owWchVRuQbQw", "artist": "will.i.am", "title": "#thatPOWER"},
+            {"id": "6qUSs4FDzZUdAhY6JDIJfa", "artist": "David Guetta",
+             "title": "Who's That Chick? (feat. Rihanna)"},
+            {"id": "7lWUJpax919G4JdaFEVmCy", "artist": "Kesha",
+             "title": "Blah Blah Blah (feat. 3OH!3)"},
+        ]
+        filenames = [
+            "will.i.am - _thatPOWER.mp3",
+            "David Guetta - Who's That Chick_ (feat. Rihanna).mp3",
+            "Kesha - Blah Blah Blah (feat. 3OH_3).mp3",
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for filename in filenames:
+                Path(temp_dir, filename).write_bytes(b"existing audio fixture")
+
+            self.assertEqual(reconcile_song_ids_flip_ids(temp_dir, tracks), (3, 0, 0))
+            rows = Path(temp_dir, ".song_ids").read_text(encoding="utf-8").splitlines()
+            fields_by_id = {row.split("\t")[0]: row.split("\t") for row in rows}
+            self.assertEqual(len(rows), 3)
+            for track, filename in zip(tracks, filenames):
+                fields = fields_by_id[track["id"]]
+                self.assertEqual(len(fields), 5)
+                self.assertEqual(fields[2:], [track["artist"], track["title"], filename])
+                self.assertEqual(Path(temp_dir, filename).read_bytes(), b"existing audio fixture")
+
+            self.assertEqual(reconcile_song_ids_flip_ids(temp_dir, tracks), (0, 0, 0))
+            self.assertEqual(cleanup_song_ids_orphans(temp_dir), {"kept": 3, "dropped_orphans": 0})
+
     def test_song_id_reconciliation_records_unique_existing_variant(self):
         track = {
             "id": "spotify-track-id",

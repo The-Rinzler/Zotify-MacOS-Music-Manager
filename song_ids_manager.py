@@ -336,6 +336,9 @@ def reconcile_song_ids_flip_ids(
         fname = cur["fname"]
         existing_fname = find_matching_filename(fname, disk_files)
         if existing_fname is None:
+            # Match the same assembled-name sanitizer used by the playlist writer.
+            existing_fname = find_matching_filename(sanitize_filename(fname), disk_files)
+        if existing_fname is None:
             continue
         row = by_fname.get(existing_fname) or by_fname.get(fname) or by_key.get(key)
         if row is None:
