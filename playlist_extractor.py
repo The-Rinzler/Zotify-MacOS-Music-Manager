@@ -15,6 +15,9 @@ from utils import CustomPrint
 from utils import sanitize_filename
 from utils import write_playlist_to_m3u8
 from utils import get_possible_filenames
+from utils import find_matching_filename
+from utils import filename_match_key
+from utils import filename_matches_any
 from utils import create_hidden_playlist_link_file
 from datetime import datetime
 from typing import Callable, Union
@@ -116,6 +119,36 @@ def clean_embedded_lyrics(file_path: str) -> str:
     return "cleaned"
 
 
+def _find_playlist_file(playlist_root: Path, expected_filename: str) -> str | None:
+    """Resolve a unique matching MP3 inside the playlist folder only."""
+    playlist_root = playlist_root.resolve()
+    available_names = set()
+    try:
+        entries = list(playlist_root.iterdir())
+    except OSError:
+        return None
+
+    for entry in entries:
+        try:
+            resolved = entry.resolve()
+            resolved.relative_to(playlist_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if entry.is_file() and resolved.is_file():
+            available_names.add(entry.name)
+
+    matched_name = find_matching_filename(expected_filename, available_names)
+    if matched_name is None:
+        return None
+
+    matched_path = (playlist_root / matched_name).resolve()
+    try:
+        matched_path.relative_to(playlist_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return str(matched_path) if matched_path.is_file() else None
+
+
 def clean_playlist_lyrics(
     playlist_dir: str, track_metadata: list[tuple[str, str, str]]
 ) -> dict[str, int]:
@@ -132,16 +165,7 @@ def clean_playlist_lyrics(
     playlist_root = Path(playlist_dir).resolve()
 
     for _, original_file_name, _ in track_metadata:
-        file_path = None
-        for possible_file_name in get_possible_filenames(original_file_name):
-            try:
-                candidate_path = (playlist_root / possible_file_name).resolve()
-                candidate_path.relative_to(playlist_root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if candidate_path.is_file():
-                file_path = str(candidate_path)
-                break
+        file_path = _find_playlist_file(playlist_root, original_file_name)
 
         if file_path is None:
             stats["unmatched"] += 1
@@ -163,20 +187,27 @@ def clean_playlist_lyrics(
             continue
 
         stats[status] += 1
-        if status == "cleaned":
-            CustomPrint.bold_print(
-                f">>> Removed timestamps from embedded lyrics: {os.path.basename(file_path)}"
-            )
-        elif status == "missing":
-            CustomPrint.bold_print(
-                f">>> No embedded lyrics found: {os.path.basename(file_path)}"
-            )
-        elif status == "unsupported_version":
-            CustomPrint.bold_print(
-                f">>> Skipped embedded lyrics with unsupported ID3 version: {os.path.basename(file_path)}"
-            )
 
     return stats
+
+
+def format_lyrics_cleanup_summary(stats: dict[str, int]) -> str:
+    """Format the lyrics scan totals without emitting per-track status lines."""
+    tracks_with_lyrics = (
+        stats["cleaned"] + stats["already_plain"] + stats["unsupported_version"]
+    )
+
+    def count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+        return f"{count} {singular if count == 1 else plural or singular + 's'}"
+
+    return (
+        f"*** Lyrics check: lyrics found on {count_phrase(tracks_with_lyrics, 'track')}; "
+        f"{count_phrase(stats['cleaned'], 'timestamp')} removed; "
+        f"lyrics missing on {count_phrase(stats['missing'], 'track')}; "
+        f"{count_phrase(stats['unmatched'], 'track')} unmatched; "
+        f"{count_phrase(stats['unsupported_version'], 'unsupported ID3 version')}; "
+        f"{count_phrase(stats['errors'], 'error')}."
+    )
 
 
 def build_playlist_track_ids(items: list[dict]) -> dict[str, str]:
@@ -296,16 +327,7 @@ def backfill_playlist_lyrics(
     consecutive_errors = 0
 
     for _, original_file_name, _ in track_metadata:
-        file_path = None
-        for possible_file_name in get_possible_filenames(original_file_name):
-            try:
-                candidate_path = (playlist_root / possible_file_name).resolve()
-                candidate_path.relative_to(playlist_root)
-            except (OSError, RuntimeError, ValueError):
-                continue
-            if candidate_path.is_file():
-                file_path = str(candidate_path)
-                break
+        file_path = _find_playlist_file(playlist_root, original_file_name)
 
         if file_path is None:
             stats["unmatched"] += 1
@@ -1165,22 +1187,20 @@ if __name__ == "__main__":
             # list all .mp3 files in the playlist directory
             actual_files = [f for f in os.listdir(playlist_dir) if f.lower().endswith('.mp3')]
 
-            # Build a mapping from acceptable variants to the expected filename
+            # Map normalized filename variants back to their expected names.
             expected_variants = {}
             for expected in expected_names:
-                variants = get_possible_filenames(expected)
-                for variant in variants:
-                    expected_variants[variant] = expected
+                for variant in get_possible_filenames(expected):
+                    expected_variants.setdefault(filename_match_key(variant), set()).add(expected)
 
             # Iterate over actual files on disk
             for actual in actual_files:
-                # Skip if the file is already exactly as expected
                 if actual in expected_names:
                     continue
 
-                # If the actual filename is one of the acceptable variants, prompt for renaming
-                if actual in expected_variants:
-                    expected_name = expected_variants[actual]
+                matching_expected = expected_variants.get(filename_match_key(actual), set())
+                if len(matching_expected) == 1:
+                    expected_name = next(iter(matching_expected))
                     response = input(f"Rename '{actual}' to '{expected_name}'? (y/n): ").strip().lower()
                     if response == 'y':
                         old_path = os.path.join(playlist_dir, actual)
@@ -1199,7 +1219,7 @@ if __name__ == "__main__":
                 s = (t.get("title") or "").strip()
                 if a and s:
                     # sanitize so "/"→"_" etc matches disk
-                    bases.add(sanitize_filename(f"{a} - {s}").casefold())
+                    bases.add(filename_match_key(sanitize_filename(f"{a} - {s}")))
             return bases
 
 
@@ -1207,8 +1227,8 @@ if __name__ == "__main__":
             m = BASE_RE.match(file_name)
             if not m:
                 return False
-            base = sanitize_filename(f"{m.group('artist').strip()} - {m.group('title').strip()}").casefold()
-            return base in playlist_bases
+            base = sanitize_filename(f"{m.group('artist').strip()} - {m.group('title').strip()}")
+            return filename_match_key(base) in playlist_bases
 
 
         def cleanup_non_matching_files(playlist_dir: str, m3u8_file: str, playlist_tracks=None) -> None:
@@ -1219,16 +1239,18 @@ if __name__ == "__main__":
                 print(f"Debug: {m3u8_file} not found!")
                 return
 
-            # Build full set of acceptable variants for each expected filename
-            acceptable = set()
-            for expected in expected_names:
-                acceptable.update(get_possible_filenames(expected))
+            # Compare normalized keys so mixed accent spellings remain recognized.
+            acceptable = {
+                filename_match_key(variant)
+                for expected in expected_names
+                for variant in get_possible_filenames(expected)
+            }
 
             playlist_bases = _playlist_bases_set(playlist_tracks)
             actual_files = [f for f in os.listdir(playlist_dir) if f.lower().endswith('.mp3')]
 
             for actual in actual_files:
-                if actual in acceptable:
+                if filename_match_key(actual) in acceptable:
                     continue
                 if _is_suffix_variant_of_playlist(actual, playlist_bases):
                     print(f"Skipped deletion (suffix variant of playlist): {actual}")
@@ -1287,14 +1309,6 @@ if __name__ == "__main__":
                     # Copy the relevant metadata line to the destination .song_ids file
                     copy_metadata_line(src_dir, author_name, song_name, dest_song_ids_file)
 
-        # Check for songs in Local Files
-        local_files_dir = os.path.join(home_dir, "Music", "Local Files")
-        local_files_songs = set()
-        for root, dirs, files in os.walk(local_files_dir):
-            for file in files:
-                if file.endswith(".mp3"):
-                    local_files_songs.add(file)
-
         TIMEOUT_SECONDS = 30  # Timeout duration in seconds
         MAX_RETRIES = 3
 
@@ -1316,20 +1330,17 @@ if __name__ == "__main__":
         with open(output_file, 'r') as f:
             m3u8_files = set(line.strip() for line in f if not line.startswith("#") and line.strip().endswith('.mp3'))
 
-        # Normalize the m3u8_files
-        normalized_m3u8_files = set()
-        for file in m3u8_files:
-            normalized_m3u8_files.update(get_possible_filenames(file))
-            normalized_m3u8_files.add(sanitize_filename(file))
+        normalized_m3u8_files = {
+            filename_match_key(variant)
+            for file in m3u8_files
+            for variant in (get_possible_filenames(file) | {sanitize_filename(file)})
+        }
 
-        # Identify files to be removed, considering possible filenames
+        # Identify files to be removed, considering accent/case-insensitive names
         files_to_remove = set()
         for file in current_files:
-            # Generate possible valid names
             possible_names = get_possible_filenames(file)
-
-            # If no possible name matches the playlist, mark it for removal
-            if not any(name in normalized_m3u8_files for name in possible_names):
+            if not any(filename_match_key(name) in normalized_m3u8_files for name in possible_names):
                 files_to_remove.add(file)
 
         # Exclude system-related hidden files
@@ -1374,10 +1385,11 @@ if __name__ == "__main__":
 
 
             # Build the normalized expected-name set already used later
-            normalized_m3u8_files = set()
-            for file in m3u8_files:
-                normalized_m3u8_files.update(get_possible_filenames(file))
-                normalized_m3u8_files.add(sanitize_filename(file))
+            normalized_m3u8_files = {
+                filename_match_key(variant)
+                for file in m3u8_files
+                for variant in (get_possible_filenames(file) | {sanitize_filename(file)})
+            }
 
             # Promote e.g. 'Radiohead - Weird Fishes _ Arpeggi_1.mp3' -> 'Radiohead - Weird Fishes _ Arpeggi.mp3'
             for fname in sorted(os.listdir(playlist_dir)):
@@ -1395,7 +1407,7 @@ if __name__ == "__main__":
                 # Only rename if:
                 # 1) canonical name is an expected playlist filename; and
                 # 2) canonical file does not already exist.
-                if canonical in normalized_m3u8_files and not os.path.exists(dst):
+                if filename_match_key(canonical) in normalized_m3u8_files and not os.path.exists(dst):
                     try:
                         os.rename(src, dst)
                         CustomPrint.bold_print(f">>> Renamed '{fname}' -> '{canonical}'", "GREEN")
@@ -1413,7 +1425,7 @@ if __name__ == "__main__":
                     continue
                 file_path = os.path.join(playlist_dir, file)
                 if os.path.exists(file_path) and os.path.isfile(file_path):
-                    if file not in normalized_m3u8_files:
+                    if filename_match_key(file) not in normalized_m3u8_files:
 
                         if _is_suffix_variant_of_playlist(file, playlist_bases):  # <— ADD THIS BLOCK
                             CustomPrint.bold_print(f">>> Skipped deletion (suffix variant of playlist): {file}")
@@ -1442,11 +1454,14 @@ if __name__ == "__main__":
         # Count for skipped songs
         skipped_songs_count = 0
         skipped_songs = []
+        playlist_mp3_names = {
+            name for name in os.listdir(playlist_dir)
+            if name.lower().endswith(".mp3") and os.path.isfile(os.path.join(playlist_dir, name))
+        }
 
         # Check for skipped songs (songs already in playlist directory)
-        for file_name, original_file_name, _ in track_metadata:
-            possible_filenames = get_possible_filenames(original_file_name)
-            if any(fname in os.listdir(playlist_dir) for fname in possible_filenames):
+        for _, original_file_name, _ in track_metadata:
+            if filename_matches_any(original_file_name, playlist_mp3_names):
                 skipped_songs_count += 1
                 skipped_songs.append(original_file_name)
 
@@ -1454,27 +1469,32 @@ if __name__ == "__main__":
         if skipped_songs_count > 0:
             CustomPrint.bold_print(f">>> {'Downloaded Songs'.ljust(fixed_width)} [{skipped_songs_count} Songs]")
 
-        # Check for songs in Local Files (that are part of the current playlist)
-        songs_in_local_files = set()
-        for root, dirs, files in os.walk(local_files_dir):
-            for file in files:
-                if file.endswith(".mp3"):
-                    for possible_file in get_possible_filenames(file):
-                        if possible_file in [f for f, _, _ in
-                                             track_metadata]:  # Only add files that are part of the current playlist
-                            songs_in_local_files.add(file)
+        # Check for songs in Local Files that are part of the current playlist.
+        local_files_dir = os.path.join(home_dir, "Music", "Local Files")
+        local_file_names = set()
+        for _, _, files in os.walk(local_files_dir):
+            local_file_names.update(file for file in files if file.lower().endswith(".mp3"))
+
+        expected_playlist_keys = {
+            filename_match_key(variant)
+            for _, expected_name, _ in track_metadata
+            for variant in get_possible_filenames(expected_name)
+        }
+        songs_in_local_files = {
+            actual_name for actual_name in local_file_names
+            if filename_match_key(actual_name) in expected_playlist_keys
+        }
 
         # Print the number of songs from the playlist found in Local Files
-        if len(songs_in_local_files) > 0:
+        if songs_in_local_files:
             CustomPrint.bold_print(
-                f">>> {'Songs found in Local Files'.ljust(fixed_width)} [{(len(songs_in_local_files))} Songs]")
+                f">>> {'Songs found in Local Files'.ljust(fixed_width)} [{len(songs_in_local_files)} Songs]")
 
         # Check for missing songs
         missing_songs = set()
-        for file_name, original_file_name, _ in track_metadata:
-            possible_filenames = get_possible_filenames(original_file_name)
-            if not any(fname in os.listdir(playlist_dir) for fname in possible_filenames) and \
-                    not any(fname in songs_in_local_files for fname in possible_filenames):
+        for _, original_file_name, _ in track_metadata:
+            if not filename_matches_any(original_file_name, playlist_mp3_names) and \
+                    not filename_matches_any(original_file_name, songs_in_local_files):
                 missing_songs.add(original_file_name)
 
         # Print the missing songs
@@ -1492,31 +1512,31 @@ if __name__ == "__main__":
         # Update MP3 tags with release year if the year field is empty
         tags_updated = False  # Flag to track if any MP3 tags were updated
 
-        for file_name, original_file_name, release_year in track_metadata:
+        for _, original_file_name, release_year in track_metadata:
+            actual_file_name = find_matching_filename(original_file_name, playlist_mp3_names)
             found_file = False
-            for possible_file_name in get_possible_filenames(original_file_name):
-                file_path = os.path.join(playlist_dir, possible_file_name)
-                if os.path.exists(file_path):
+            if actual_file_name is not None:
+                file_path = os.path.join(playlist_dir, actual_file_name)
+                if os.path.isfile(file_path):
+                    found_file = True
                     try:
                         audio = EasyID3(file_path)
                     except ID3NoHeaderError:
                         audio = EasyID3()
-                    if not audio.get('date'):  # Check if the year field is empty
-                        if release_year != 'Unknown':
-                            audio['date'] = release_year
-                            try:
-                                audio.save()
-                                CustomPrint.bold_print(f">>> MP3 tag updated for {possible_file_name}")
-                                tags_updated = True  # Set flag to True if a tag was updated
-                            except TypeError as e:
-                                CustomPrint.bold_print(
-                                    f"!!! ERROR: Problem updating MP3 tag for {possible_file_name}: {e}", "RED")
-                                with open(os.path.join(playlist_dir, 'tag_update_errors.log'), 'a') as log_file:
-                                    CustomPrint.bold_print(
-                                        f"!!! ERROR: Problem updating MP3 tag for {possible_file_name}: {e}\n", "RED")
-                    found_file = True
-                    break
-            if not found_file and original_file_name not in local_files_songs and original_file_name not in missing_songs:
+                    if not audio.get('date') and release_year != 'Unknown':
+                        audio['date'] = release_year
+                        try:
+                            audio.save(file_path)
+                            CustomPrint.bold_print(f">>> MP3 tag updated for {actual_file_name}")
+                            tags_updated = True
+                        except TypeError as e:
+                            CustomPrint.bold_print(
+                                f"!!! ERROR: Problem updating MP3 tag for {actual_file_name}: {e}", "RED")
+                            with open(os.path.join(playlist_dir, 'tag_update_errors.log'), 'a') as log_file:
+                                log_file.write(
+                                    f"!!! ERROR: Problem updating MP3 tag for {actual_file_name}: {e}\n")
+            if not found_file and not filename_matches_any(original_file_name, songs_in_local_files) and \
+                    original_file_name not in missing_songs:
                 CustomPrint.bold_print(f">>> Unable to find or match {original_file_name} to update MP3 tag")
 
         # Print final message only if tags were updated
@@ -1524,15 +1544,7 @@ if __name__ == "__main__":
             CustomPrint.bold_print("*** MP3 tag updating process completed. \n", "GREEN")
 
         lyrics_stats = clean_playlist_lyrics(playlist_dir, track_metadata)
-        CustomPrint.bold_print(
-            "*** Embedded lyrics cleanup: "
-            f"timestamps removed={lyrics_stats['cleaned']}, "
-            f"already plain={lyrics_stats['already_plain']}, "
-            f"no lyrics={lyrics_stats['missing']}, "
-            f"unmatched={lyrics_stats['unmatched']}, "
-            f"unsupported version={lyrics_stats['unsupported_version']}, "
-            f"errors={lyrics_stats['errors']}."
-        )
+        CustomPrint.bold_print(format_lyrics_cleanup_summary(lyrics_stats))
 
         # Backfill: fetch missing lyrics from Spotify (same color-lyrics
         # endpoint Zotify uses) and embed them into previously downloaded

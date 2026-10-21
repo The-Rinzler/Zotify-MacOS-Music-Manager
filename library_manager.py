@@ -42,7 +42,7 @@ from requests import ReadTimeout
 import spotipy
 from spotipy import SpotifyException
 
-from utils import CustomPrint, sanitize_filename, write_playlist_to_m3u8
+from utils import CustomPrint, filename_matches_any, sanitize_filename, write_playlist_to_m3u8
 from spotify_api import fetch_playlist_tracks
 
 
@@ -420,6 +420,17 @@ def check_missing_songs_in_playlists(m3u_dir: str, songs_dir: str) -> Dict[str, 
     for compatibility with path-only Manager playlists.  Missing references
     are collected into a list keyed by the playlist filename.
     """
+    def exists_with_filename_variant(candidate: Path) -> bool:
+        if candidate.is_file():
+            return True
+        try:
+            actual_names = {
+                entry.name for entry in candidate.parent.iterdir() if entry.is_file()
+            }
+        except OSError:
+            return False
+        return filename_matches_any(candidate.name, actual_names)
+
     missing_songs: Dict[str, List[str]] = {}
     for file in os.listdir(m3u_dir):
         if file.endswith('.m3u8'):
@@ -438,7 +449,8 @@ def check_missing_songs_in_playlists(m3u_dir: str, songs_dir: str) -> Dict[str, 
                     # always follow standard M3U playlist-relative semantics.
                     if song_ref.parent == Path('.'):
                         candidates.append(Path(songs_dir) / song_ref)
-                if not any(candidate.exists() for candidate in candidates):
+
+                if not any(exists_with_filename_variant(candidate) for candidate in candidates):
                     missing.append(song)
             if missing:
                 missing_songs[file] = missing

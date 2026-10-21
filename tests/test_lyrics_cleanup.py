@@ -1,17 +1,68 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from mutagen.id3 import ID3, TIT2, USLT
 
 from playlist_extractor import (
     clean_embedded_lyrics,
     clean_playlist_lyrics,
+    format_lyrics_cleanup_summary,
     strip_lyric_timestamps,
 )
 
 
 class LyricsCleanupTests(unittest.TestCase):
+    def test_summary_reports_total_tracks_with_lyrics(self):
+        summary = format_lyrics_cleanup_summary(
+            {
+                "cleaned": 1,
+                "already_plain": 75,
+                "missing": 11,
+                "unmatched": 1,
+                "unsupported_version": 0,
+                "errors": 0,
+            }
+        )
+
+        self.assertEqual(
+            summary,
+            "*** Lyrics check: lyrics found on 76 tracks; 1 timestamp removed; "
+            "lyrics missing on 11 tracks; 1 track unmatched; 0 unsupported ID3 versions; 0 errors.",
+        )
+
+    def test_summary_counts_lyrics_on_unsupported_id3_versions(self):
+        summary = format_lyrics_cleanup_summary(
+            {
+                "cleaned": 1,
+                "already_plain": 75,
+                "missing": 11,
+                "unmatched": 1,
+                "unsupported_version": 2,
+                "errors": 0,
+            }
+        )
+
+        self.assertIn("lyrics found on 78 tracks", summary)
+        self.assertIn("2 unsupported ID3 versions", summary)
+
+    def test_scan_does_not_print_per_track_missing_lyrics(self):
+        with TemporaryDirectory() as temp_dir:
+            filename = "Artist - No Lyrics.mp3"
+            (Path(temp_dir) / filename).touch()
+            output = StringIO()
+
+            with redirect_stdout(output):
+                stats = clean_playlist_lyrics(
+                    temp_dir, [("No Lyrics", filename, "2000")]
+                )
+
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(stats["missing"], 1)
+
     def test_playlist_pass_cleans_embedded_lyrics_and_reports_missing_tags(self):
         with TemporaryDirectory() as temp_dir:
             synced_file = Path(temp_dir) / "Artist - Synced.mp3"
@@ -34,14 +85,16 @@ class LyricsCleanupTests(unittest.TestCase):
             sidecar = Path(temp_dir) / "Artist - Synced.lrc"
             sidecar.write_text("[00:01.00]Synced line\n", encoding="utf-8")
 
-            stats = clean_playlist_lyrics(
-                str(temp_dir),
-                [
-                    ("Synced", "Artist - Synced.mp3", "2024"),
-                    ("No Lyrics", "Artist - No Lyrics.mp3", "2024"),
-                    ("Absent", "Artist - Absent.mp3", "2024"),
-                ],
-            )
+            with patch("playlist_extractor.CustomPrint.bold_print") as output:
+                stats = clean_playlist_lyrics(
+                    str(temp_dir),
+                    [
+                        ("Synced", "Artist - Synced.mp3", "2024"),
+                        ("No Lyrics", "Artist - No Lyrics.mp3", "2024"),
+                        ("Absent", "Artist - Absent.mp3", "2024"),
+                    ],
+                )
+                output.assert_not_called()
 
             self.assertEqual(
                 stats,
@@ -49,6 +102,21 @@ class LyricsCleanupTests(unittest.TestCase):
             )
             self.assertEqual(ID3(synced_file).getall("USLT")[0].text, "Synced line")
             self.assertEqual(sidecar.read_text(encoding="utf-8"), "[00:01.00]Synced line\n")
+
+    def test_playlist_cleanup_matches_accented_filename_variants(self):
+        with TemporaryDirectory() as temp_dir:
+            actual_name = "Beyoncé - Upgrade U (feat. JAŸ-Z).mp3"
+            tags = ID3()
+            tags.add(USLT(encoding=3, lang="eng", desc="", text="Plain lyrics"))
+            tags.save(Path(temp_dir) / actual_name)
+
+            stats = clean_playlist_lyrics(
+                temp_dir,
+                [("Upgrade U", "Beyoncé - Upgrade U (feat. JAY-Z).mp3", "2006")],
+            )
+
+        self.assertEqual(stats["already_plain"], 1)
+        self.assertEqual(stats["unmatched"], 0)
 
     def test_playlist_cleanup_does_not_follow_paths_outside_playlist_directory(self):
         with TemporaryDirectory() as temp_dir:

@@ -50,6 +50,24 @@ class M3U8CompatibilityTests(unittest.TestCase):
                 {},
             )
 
+    def test_missing_song_check_matches_accent_variant_filename(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            playlist_dir = Path(temp_dir) / "playlists"
+            playlist_dir.mkdir()
+            actual_name = "Beyoncé - Upgrade U (feat. JAŸ-Z).mp3"
+            (playlist_dir / actual_name).write_bytes(b"audio")
+            (playlist_dir / "mix.m3u8").write_text(
+                "#EXTM3U\nBeyoncé - Upgrade U (feat. JAY-Z).mp3\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                library_manager.check_missing_songs_in_playlists(
+                    str(playlist_dir), str(playlist_dir)
+                ),
+                {},
+            )
+
     def test_missing_song_check_keeps_library_root_fallback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

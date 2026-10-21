@@ -46,7 +46,7 @@ from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Set, Optional
 
-from utils import CustomPrint, sanitize_filename
+from utils import CustomPrint, find_matching_filename, filename_match_key, sanitize_filename
 
 __all__ = [
     "reconcile_song_ids_flip_ids",
@@ -164,18 +164,24 @@ def cleanup_song_ids_orphans(playlist_dir: str) -> Dict[str, int]:
     hidden_file_path = os.path.join(playlist_dir, ".song_ids")
     rows = _read_song_ids_rows(hidden_file_path)
 
-    # Index disk files (exact names)
+    # Index disk files and resolve saved names conservatively across accents/case.
     try:
         disk_files = {f for f in os.listdir(playlist_dir) if f.lower().endswith(".mp3")}
     except FileNotFoundError:
         disk_files = set()
+    disk_file_keys = {filename_match_key(name) for name in disk_files}
 
     kept_rows = []
     dropped_orphans = 0
 
     for r in rows:
-        filename = r.get("filename") or f"{r.get('artist', '')} - {r.get('song', '')}.mp3"
-        if filename in disk_files:
+        filename = str(r.get("filename") or f"{r.get('artist', '')} - {r.get('song', '')}.mp3")
+        existing_name = find_matching_filename(filename, disk_files)
+        if existing_name is not None:
+            r["filename"] = existing_name
+            kept_rows.append(r)
+        elif filename_match_key(filename) in disk_file_keys:
+            # Keep ambiguous matches rather than discarding an archive entry.
             kept_rows.append(r)
         else:
             dropped_orphans += 1
@@ -269,35 +275,44 @@ def reconcile_song_ids_flip_ids(
         }
 
     added = flipped = deduped = 0
+    try:
+        disk_files = {name for name in os.listdir(playlist_dir) if name.lower().endswith(".mp3")}
+    except FileNotFoundError:
+        disk_files = set()
 
-    # For each playlist entry, if the file exists on disk, ensure there is a row
+    # For each playlist entry, find its exact or uniquely normalized disk name.
     for key, cur in pl.items():
         fname = cur["fname"]
-        file_exists = (Path(playlist_dir) / fname).is_file()
-        if not file_exists:
+        existing_fname = find_matching_filename(fname, disk_files)
+        if existing_fname is None:
             continue
-        row = by_fname.get(fname) or by_key.get(key)
+        row = by_fname.get(existing_fname) or by_fname.get(fname) or by_key.get(key)
         if row is None:
-            # Missing row → add
+            # Missing row → add; preserve the spelling actually present on disk.
             rows.append({
                 "id": cur["id"],
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "artist": cur["artist"],
                 "title": cur["title"],
-                "fname": fname,
+                "fname": existing_fname,
                 "key": key,
             })
-            by_fname[fname] = rows[-1]
+            by_fname[existing_fname] = rows[-1]
             by_key[key] = rows[-1]
             added += 1
         else:
-            # Row exists but ID differs → flip ID and update timestamp
-            if row["id"] != cur["id"] and row["artist"] == cur["artist"] and row["title"] == cur["title"]:
+            # The file path matched uniquely, even when its display spelling differs.
+            row_key = filename_match_key(f"{row['artist']} - {row['title']}.mp3")
+            track_key = filename_match_key(f"{cur['artist']} - {cur['title']}.mp3")
+            if row["id"] != cur["id"] and row_key == track_key:
                 row["id"] = cur["id"]
                 row["ts"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                row["artist"] = cur["artist"]
+                row["title"] = cur["title"]
+                row["fname"] = existing_fname
                 flipped += 1
-                by_fname[fname] = row
-                by_key[key] = row
+            by_fname[existing_fname] = row
+            by_key[key] = row
 
     # Deduplicate by filename: keep row with the latest timestamp; prefer matching playlist ID
     final_by_fname: Dict[str, Dict[str, object]] = {}

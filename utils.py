@@ -195,6 +195,52 @@ def write_playlist_to_m3u8(tracks, output_file: str):
     return track_metadata
 
 
+def filename_match_key(filename: str) -> str:
+    """Return an accent- and case-insensitive key for a filename basename.
+
+    Punctuation and spacing remain significant so this is only a spelling
+    fallback, not a fuzzy title matcher.
+    """
+    decomposed = unicodedata.normalize("NFKD", Path(filename).name).casefold()
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def filename_matches_any(expected_filename: str, candidate_filenames) -> bool:
+    """Return whether any candidate is an accent/case spelling of the expected name."""
+    expected_keys = {
+        filename_match_key(variant) for variant in get_possible_filenames(expected_filename)
+    }
+    return any(filename_match_key(name) in expected_keys for name in candidate_filenames)
+
+
+def find_matching_filename(expected_filename: str, candidate_filenames) -> str | None:
+    """Find one existing filename matching an expected name, or fail closed.
+
+    Prefer exact or established filename variants. As a final fallback, compare
+    casefolded, accent-insensitive names; return a result only when that match
+    is unique, so similarly named files are never selected arbitrarily.
+    """
+    expected = Path(expected_filename).name
+    candidates = {Path(name).name for name in candidate_filenames}
+
+    if expected in candidates:
+        return expected
+
+    direct_matches = candidates.intersection(get_possible_filenames(expected))
+    if len(direct_matches) == 1:
+        return next(iter(direct_matches))
+    if direct_matches:
+        return None
+
+    expected_keys = {
+        filename_match_key(variant) for variant in get_possible_filenames(expected)
+    }
+    normalized_matches = [
+        name for name in candidates if filename_match_key(name) in expected_keys
+    ]
+    return normalized_matches[0] if len(normalized_matches) == 1 else None
+
+
 def get_possible_filenames(file_name: str) -> set[str]:
     possible_filenames = set()
     p = Path(file_name)
