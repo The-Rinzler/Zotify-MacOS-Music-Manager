@@ -150,13 +150,37 @@ def _read_song_ids_rows(hidden_file_path: str) -> List[Dict[str, object]]:
     return rows
 
 
+def _index_mp3s_by_embedded_track_id(playlist_dir: str, filenames: Set[str]) -> Dict[str, Set[str]]:
+    """Index exact Zotify TRACKID TXXX tags without inferring from filenames."""
+    try:
+        from mutagen.id3 import ID3
+    except ImportError:
+        return {}
+
+    files_by_track_id: Dict[str, Set[str]] = defaultdict(set)
+    for filename in sorted(filenames):
+        try:
+            tags = ID3(os.path.join(playlist_dir, filename))
+        except Exception:
+            continue
+        for frame in tags.getall("TXXX"):
+            if str(getattr(frame, "desc", "")).casefold() != "trackid":
+                continue
+            for value in getattr(frame, "text", ()) or ():
+                track_id = str(value).strip()
+                if track_id:
+                    files_by_track_id[track_id].add(filename)
+
+    return files_by_track_id
+
+
 def cleanup_song_ids_orphans(playlist_dir: str) -> Dict[str, int]:
     """Remove rows in ``.song_ids`` where the referenced file no longer exists on disk.
 
-    This helper rewrites the ``.song_ids`` file keeping only entries whose
-    ``filename`` exists in ``playlist_dir``.  The rows are written back in a
-    deterministic order (sorted by artist and title).  The return value is a
-    dictionary with two keys:
+    This helper rewrites the ``.song_ids`` file, retaining rows whose saved
+    filename resolves to a file in ``playlist_dir`` or whose embedded Zotify
+    ``TRACKID`` identifies a file there. Recovered rows are updated to an actual
+    on-disk filename. Rows are written back in deterministic artist/title order.
 
     - ``kept``: the number of rows retained
     - ``dropped_orphans``: the number of rows discarded
@@ -171,6 +195,22 @@ def cleanup_song_ids_orphans(playlist_dir: str) -> Dict[str, int]:
         disk_files = set()
     disk_file_keys = {filename_match_key(name) for name in disk_files}
 
+    track_id_index = None
+
+    def filename_for_track_id(track_id: str, expected_filename: str) -> Optional[str]:
+        nonlocal track_id_index
+        if track_id_index is None:
+            track_id_index = _index_mp3s_by_embedded_track_id(playlist_dir, disk_files)
+        matches = track_id_index.get(str(track_id or ""), set())
+        if not matches:
+            return None
+        expected_key = filename_match_key(expected_filename)
+        return min(matches, key=lambda name: (
+            filename_match_key(name) != expected_key,
+            name.casefold(),
+            name,
+        ))
+
     kept_rows = []
     dropped_orphans = 0
 
@@ -181,10 +221,21 @@ def cleanup_song_ids_orphans(playlist_dir: str) -> Dict[str, int]:
             r["filename"] = existing_name
             kept_rows.append(r)
         elif filename_match_key(filename) in disk_file_keys:
-            # Keep ambiguous matches rather than discarding an archive entry.
+            # Keep ambiguous spelling variants. When Zotify's embedded ID is
+            # available, also update the row to a real path (including suffix copies).
+            matched_filename = filename_for_track_id(str(r.get("id") or ""), filename)
+            if matched_filename is not None:
+                r["filename"] = matched_filename
             kept_rows.append(r)
         else:
-            dropped_orphans += 1
+            # Zotify records TRACKID in the MP3's TXXX tag. Recover the real path
+            # from that exact ID before declaring a stale archive row orphaned.
+            matched_filename = filename_for_track_id(str(r.get("id") or ""), filename)
+            if matched_filename is not None:
+                r["filename"] = matched_filename
+                kept_rows.append(r)
+            else:
+                dropped_orphans += 1
 
     # Deterministic write
     new_lines: List[str] = []

@@ -750,52 +750,6 @@ if __name__ == "__main__":
             return rows
 
 
-        def cleanup_song_ids_orphans(playlist_dir: str) -> dict:
-            """
-            Remove stale rows from .song_ids where the file is no longer present on disk.
-            Keeps rows whose 'filename' exists in 'playlist_dir'.
-            Writes back deterministically (artist, title sort).
-            Returns simple stats dict.
-            """
-            hidden_file_path = os.path.join(playlist_dir, ".song_ids")
-            rows = _read_song_ids_rows(hidden_file_path)
-
-            # Index disk files (exact names)
-            try:
-                disk_files = {f for f in os.listdir(playlist_dir) if f.lower().endswith(".mp3")}
-            except FileNotFoundError:
-                disk_files = set()
-
-            kept_rows = []
-            dropped_orphans = 0
-
-            for r in rows:
-                filename = r.get("filename") or f"{r.get('artist', '')} - {r.get('song', '')}.mp3"
-                if filename in disk_files:
-                    kept_rows.append(r)
-                else:
-                    dropped_orphans += 1
-
-            # Deterministic write like you do elsewhere
-            new_lines = []
-            for r in kept_rows:
-                tid = r["id"]
-                ts_s = r["ts_s"]
-                artist = r["artist"]
-                title = r["song"]
-                filename = r.get("filename") or f"{artist} - {title}.mp3"
-                new_lines.append(f"{tid}\t{ts_s}\t{artist}\t{title}\t{filename}\n")
-
-            new_lines.sort(key=lambda line: (line.split("\t")[2].casefold(), line.split("\t")[3].casefold()))
-
-            with open(hidden_file_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-
-            return {
-                "kept": len(kept_rows),
-                "dropped_orphans": dropped_orphans,
-            }
-
 
         def rename_single_variant_to_canonical(playlist_dir: str, playlist_tracks: list[dict[str, any]]):
             """
@@ -1436,7 +1390,7 @@ if __name__ == "__main__":
                         except Exception as e:
                             CustomPrint.bold_print(f">>> Error removing '{file}': {e}", "RED")
             CustomPrint.bold_print("*** Cleanup completed.", "GREEN")
-            stats2 = cleanup_song_ids_orphans(playlist_dir)
+            stats2 = sid_cleanup_song_ids_orphans(playlist_dir)
             CustomPrint.bold_print(
                 f">>> .song_ids cleaned: kept={stats2['kept']}, dropped_orphans={stats2['dropped_orphans']}",
                 "GREEN"
