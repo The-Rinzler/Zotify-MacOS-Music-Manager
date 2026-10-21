@@ -34,6 +34,56 @@ leftovers. Back up your library and test on disposable copies before production
 use. Declining one prompt is not a general dry-run mode. This release does not
 add a universal `--dry-run` or a library-root CLI option.
 
+## Spotify playlist duplicate detector
+
+The extractor reports duplicate candidates **before library maintenance**:
+
+- **Exact repeats:** the same Spotify track ID appears at multiple playlist
+  positions. Repeated membership may be intentional.
+- **Shared-ISRC candidates:** different catalog IDs share a recording code. This
+  can identify album/single reissues, but is **not proof of identical audio**.
+- **Filename collisions:** different IDs map to the same sanitized
+  `First Artist - Title.mp3` name (including case/Unicode spelling collisions on
+  typical macOS volumes). A collision is not an instruction to merge tracks.
+
+The warning uses a concise song-and-ID list:
+
+```text
+>>> Duplicate songs in playlist:
+Song: Artist - Title (Spotify track ID)
+Song: Artist - Title (Spotify track ID)
+```
+
+Exact repeats list each repeated occurrence. Different-ID candidates appear
+separately under `Possible duplicate songs in playlist (review only)`; the same
+ID is listed only once there even when it matches both ISRC and filename checks.
+**The detector only informs the user.** It does not remove entries, skip tracks,
+merge audio or delete files. Normal processing continues after the warning.
+
+Only available playlist metadata is used: no extra per-track API requests or
+lyrics authentication. Local/removed items without Spotify IDs are excluded from
+ID comparisons. Live/remix/extended version names are not stripped or merged.
+
+To **only inspect** a playlist, run from this manager checkout:
+
+```zsh
+env -u PYTHONPATH -u PYTHONHOME .venv/bin/python playlist_extractor.py --duplicates-only
+```
+
+Paste the playlist URL at the usual prompt, or supply it as a positional argument.
+This mode exits before creating library directories, writing M3U8/hidden files,
+reconciling `.song_ids`, editing tags/lyrics or cleaning up audio. It needs normal
+playlist OAuth access; Spotify's token cache may still refresh. It does not
+request playlist-modification scopes or edit the remote playlist.
+
+Review unwanted entries in Spotify, remove only the occurrences you choose,
+then rerun the extractor normally before downloading. The normal extractor also
+prints the report, **then continues its existing mutating maintenance workflow**;
+it does not automatically filter the playlist or block downloads. A numbered
+`_1.mp3` file is not automatically deleted: first compare both files' audio/tags
+and archive IDs. Neither a common filename nor a shared ISRC proves that deleting
+one is safe. The filename sanitizer and five-column archive format are unchanged.
+
 ## Quick setup (macOS only)
 
 Install [Homebrew](https://brew.sh/) if needed, then:

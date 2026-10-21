@@ -22,6 +22,7 @@ from utils import create_hidden_playlist_link_file
 from datetime import datetime
 from typing import Callable, Union
 from zotify_lyrics import ZotifyAuthError, ZotifyTokenProvider
+from playlist_duplicates import analyze_playlist_duplicates, format_playlist_duplicate_report
 
 # Import centralized Spotify API helpers and song ID management functions.
 from spotify_api import (
@@ -47,6 +48,11 @@ def get_playlist_url():
     """Get the playlist URL from command-line argument or prompt user."""
     parser = argparse.ArgumentParser(description="Extract and manage Spotify playlists.")
     parser.add_argument('playlist_url', nargs='?', help="Spotify playlist URL")
+    parser.add_argument(
+        "--duplicates-only",
+        action="store_true",
+        help="Report Spotify playlist duplicates and exit before library maintenance",
+    )
     parser.add_argument(
         '--no-lyrics-backfill',
         action='store_true',
@@ -524,6 +530,13 @@ if __name__ == "__main__":
         # transparently handles pagination and mirrors the behaviour of the
         # original while-loop.
         tracks = fetch_playlist_tracks(sp, playlist_url)
+
+        # Diagnose playlist membership before touching any library paths or archives.
+        duplicate_report = analyze_playlist_duplicates(tracks)
+        CustomPrint.print(format_playlist_duplicate_report(duplicate_report))
+        if extractor_args.duplicates_only:
+            CustomPrint.print(">>> Library unchanged; Spotify playlist unchanged.")
+            raise SystemExit(0)
 
         # Define the base music path relative to the home directory
         base_music_path = os.path.join(home_dir, "Music", "Zotify Music")

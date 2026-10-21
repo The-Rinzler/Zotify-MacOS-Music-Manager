@@ -6,6 +6,12 @@ publish an independent Python package version; identify source by Git commit.
 ## Unreleased — macOS release preparation
 
 ### Added
+- Spotify playlist duplicate diagnostics before extractor maintenance: repeated
+  track IDs, shared-ISRC review candidates and different-ID filename collisions,
+  using a concise `Song: Artist - Title (song_id)` warning; possible matches
+  remain separate from confirmed repeated membership.
+  `--duplicates-only` exits before library writes; it does not edit Spotify,
+  filter playlist membership, merge recordings or delete existing numbered files.
 - `playlist_extractor.py` strips leading LRC timestamps from embedded MP3 lyrics,
   then fetches missing lyrics from Spotify's `color-lyrics/v2` endpoint and embeds
   them without replacing existing lyrics or other ID3 tags. No external lyrics
