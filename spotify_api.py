@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import os
 import time
+import math
+from email.utils import parsedate_to_datetime
 from typing import Callable, List, Optional, Tuple, Union
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
@@ -107,13 +109,25 @@ def parse_spotify_lyrics(payload: Optional[dict]) -> Tuple[bool, str]:
     return True, text
 
 
+def lyrics_retry_after(value, *, now=time.time) -> float:
+    """Parse Retry-After seconds or HTTP-date, with a conservative minimum."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            seconds = parsedate_to_datetime(value).timestamp() - now()
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            return 60.0
+    return max(60.0, seconds) if math.isfinite(seconds) else 60.0
+
+
 def fetch_track_lyrics(
     track_id: str,
     bearer_token: Union[str, Callable[[], str]],
     *,
     http_get: Optional[Callable] = None,
     sleep: Callable[[float], None] = time.sleep,
-    retry_attempts: int = 3,
+    retry_attempts: int = 1,
     timeout: float = 15.0,
 ) -> Tuple[str, str]:
     """Fetch Spotify lyrics for a track ID the way Zotify does.
@@ -123,7 +137,10 @@ def fetch_track_lyrics(
     ``LYRICS_OK`` (text holds plain lyrics), ``LYRICS_UNAVAILABLE`` (track has
     no lyrics - normal, not every song does), ``LYRICS_AUTH_ERROR`` (token was
     rejected; retrying other tracks will not help), ``LYRICS_RATE_LIMITED`` or
-    ``LYRICS_ERROR`` (transient; safe to retry later).
+    ``LYRICS_ERROR`` (transient; safe to retry later). A 429 is never retried
+    here: the second tuple field gives Retry-After seconds for a shared
+    cooldown. Other error details are allowlisted; response bodies and tokens
+    are never returned. Network/5xx errors get at most one retry by default.
     """
     if http_get is None:
         import requests
@@ -148,7 +165,7 @@ def fetch_track_lyrics(
             response = http_get(LYRICS_URL + track_id, headers=headers, timeout=timeout)
         except Exception:
             if attempt >= retry_attempts:
-                return LYRICS_ERROR, ""
+                return LYRICS_ERROR, "connection/timeout failure"
             sleep(backoffs[min(attempt, len(backoffs) - 1)])
             continue
 
@@ -157,31 +174,35 @@ def fetch_track_lyrics(
             try:
                 payload = response.json()
             except Exception:
-                return LYRICS_ERROR, ""
+                return LYRICS_ERROR, "invalid JSON"
+            if not isinstance(payload, dict) or "lyrics" not in payload:
+                return LYRICS_ERROR, "invalid lyrics payload"
+            lyrics = payload.get("lyrics")
+            if lyrics is not None and (
+                not isinstance(lyrics, dict) or not isinstance(lyrics.get("lines"), list)
+                or any(not isinstance(line, dict) or not isinstance(line.get("words"), str)
+                       for line in lyrics["lines"])
+            ):
+                return LYRICS_ERROR, "invalid lyrics payload"
             found, text = parse_spotify_lyrics(payload)
             if found:
                 return LYRICS_OK, text
-            # 200 with no usable payload, or empty/None lyrics object:
-            # the track simply has no lyrics in Spotify's catalogue.
+            # Explicit null or validated lines with no text mean no lyrics.
             return LYRICS_UNAVAILABLE, ""
         if status_code in (401, 403):
             return LYRICS_AUTH_ERROR, f"HTTP {status_code}"
         if status_code == 404:
             return LYRICS_UNAVAILABLE, ""
         if status_code == 429:
-            if attempt >= retry_attempts:
-                return LYRICS_RATE_LIMITED, ""
-            retry_after = 0.0
-            try:
-                retry_after = float(dict(getattr(response, "headers", {}) or {}).get("Retry-After", 0))
-            except (TypeError, ValueError):
-                retry_after = 0.0
-            sleep(max(retry_after, backoffs[min(attempt, len(backoffs) - 1)]))
-            continue
+            response_headers = getattr(response, "headers", {}) or {}
+            retry_after = next(
+                (value for key, value in response_headers.items() if key.lower() == "retry-after"), None
+            )
+            return LYRICS_RATE_LIMITED, str(lyrics_retry_after(retry_after))
         if 500 <= status_code < 600 and attempt < retry_attempts:
             sleep(backoffs[min(attempt, len(backoffs) - 1)])
             continue
-        return LYRICS_ERROR, ""
+        return LYRICS_ERROR, f"HTTP {status_code}"
 
     return LYRICS_ERROR, ""
 

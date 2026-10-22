@@ -190,6 +190,37 @@ track ID, then aborts the lyrics pass; this is **not** a missing-lyrics result.
 Even a valid session may be denied by Spotify; this integration does not bypass
 endpoint/account restrictions. HTTP 429 remains a rate-limit failure.
 
+### Fewer lyrics requests
+
+Before asking Spotify, the extractor scans the local library once per search root.
+It copies missing MP3s from other playlists or `~/Music/Local Files`, preserving
+embedded tags, and can fill a playlist copy's missing lyrics from a local match
+without replacing its audio. Non-empty lyrics are never overwritten. Known
+conflicting Spotify track IDs are rejected; display names alone do not prove
+that two recordings are identical.
+
+The lyrics endpoint takes one track ID per request; there is no supported bulk
+route used by this integration. Instead, it avoids unnecessary lookups:
+
+- Files already containing lyrics need no lyrics request or Zotify session.
+- Repeated track IDs share one result within a run.
+- A shared disposable cache stores found lyrics for **30 days** and confirmed
+  missing lyrics for **7 days**, across playlists and subsequent runs. Songs
+  without lyrics remain in the playlist; only their lyrics lookup is skipped.
+- 401/403, 429, malformed payloads and temporary failures are **not** cached as
+  “no lyrics.” A 429 stops new requests and saves Spotify's `Retry-After`
+  cooldown (at least 60 seconds); usable cached results can still be applied.
+- The final summary reports lookups, cached results and deferred tracks. Network
+  and 5xx failures get at most one retry per lookup by default.
+
+On macOS the cache is `~/Library/Caches/zotify-music-manager/lyrics.sqlite3`;
+elsewhere it uses `$XDG_CACHE_HOME/zotify-music-manager/lyrics.sqlite3` or
+`~/.cache/zotify-music-manager/lyrics.sqlite3`. It contains lyrics/results and
+cooldown times, **never credentials or tokens**. An unusable cache does not stop
+playlist processing. `--refresh-lyrics-cache` rechecks saved results but still
+skips embedded lyrics and respects provider cooldowns. `--no-lyrics-backfill`
+skips Spotify lyrics requests entirely.
+
 ## Library locations and first run
 
 The interactive scripts currently use these **fixed home-relative paths**:

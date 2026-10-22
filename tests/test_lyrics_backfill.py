@@ -111,6 +111,26 @@ class FetchTrackLyricsTests(unittest.TestCase):
         status, _ = fetch_track_lyrics("x", "t", http_get=http_get, sleep=lambda s: None)
         self.assertEqual(status, LYRICS_UNAVAILABLE)
 
+    def test_200_missing_lyrics_field_is_api_error(self):
+        http_get, _ = self.make_getter([FakeResponse(200, {})])
+        self.assertEqual(
+            fetch_track_lyrics("x", "t", http_get=http_get),
+            (LYRICS_ERROR, "invalid lyrics payload"),
+        )
+
+    def test_200_error_object_is_api_error(self):
+        http_get, _ = self.make_getter([FakeResponse(200, {"error": "temporary failure"})])
+        self.assertEqual(
+            fetch_track_lyrics("x", "t", http_get=http_get),
+            (LYRICS_ERROR, "invalid lyrics payload"),
+        )
+
+    def test_200_empty_lines_are_unavailable(self):
+        http_get, _ = self.make_getter([FakeResponse(200, {"lyrics": {"lines": []}})])
+        self.assertEqual(
+            fetch_track_lyrics("x", "t", http_get=http_get), (LYRICS_UNAVAILABLE, ""),
+        )
+
     def test_invalid_json_response_is_reported_as_api_error(self):
         http_get, _ = self.make_getter([FakeResponse(200)])
         status, _ = fetch_track_lyrics("x", "t", http_get=http_get, sleep=lambda s: None)
@@ -124,7 +144,7 @@ class FetchTrackLyricsTests(unittest.TestCase):
         self.assertEqual(status, LYRICS_AUTH_ERROR)
         self.assertEqual(len(calls), 1)
 
-    def test_rate_limit_is_respected_then_recovers(self):
+    def test_rate_limit_stops_without_spending_retries(self):
         http_get, calls = self.make_getter(
             [FakeResponse(429, headers={"Retry-After": "7"}), FakeResponse(200, synced_payload())]
         )
@@ -132,9 +152,32 @@ class FetchTrackLyricsTests(unittest.TestCase):
         status, text = fetch_track_lyrics(
             "x", "t", http_get=http_get, sleep=slept.append, retry_attempts=2
         )
-        self.assertEqual(status, LYRICS_OK)
-        self.assertEqual(text, "First line\nSecond line")
-        self.assertIn(7.0, slept)
+        self.assertEqual(status, LYRICS_RATE_LIMITED)
+        self.assertGreaterEqual(float(text), 7.0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(slept, [])
+
+    def test_retry_after_accepts_seconds_and_http_dates_safely(self):
+        from spotify_api import lyrics_retry_after
+        from email.utils import formatdate
+        self.assertEqual(lyrics_retry_after("120", now=lambda: 1000), 120)
+        self.assertEqual(lyrics_retry_after(formatdate(1120, usegmt=True), now=lambda: 1000), 120)
+        for value in (None, "bad", "-1", "nan", "inf", "0"):
+            self.assertEqual(lyrics_retry_after(value), 60)
+
+    def test_default_transient_retry_budget_is_one_retry(self):
+        http_get, calls = self.make_getter([FakeResponse(503)])
+        status, detail = fetch_track_lyrics("x", "t", http_get=http_get, sleep=lambda _: None)
+        self.assertEqual(status, LYRICS_ERROR)
+        self.assertEqual(detail, "HTTP 503")
+        self.assertEqual(len(calls), 2)
+
+    def test_malformed_success_payload_is_not_cached_as_unavailable(self):
+        for payload in ([1], {"lyrics": "bad"}, {"lyrics": {"lines": "bad"}}):
+            with self.subTest(payload=payload):
+                http_get, _ = self.make_getter([FakeResponse(200, payload)])
+                status, _ = fetch_track_lyrics("x", "t", http_get=http_get, sleep=lambda _: None)
+                self.assertEqual(status, LYRICS_ERROR)
 
     def test_persistent_rate_limit_gives_up(self):
         http_get, _ = self.make_getter([FakeResponse(429)])
@@ -301,6 +344,9 @@ class BackfillFlowTests(unittest.TestCase):
                     "unsupported_version": 0,
                     "errors": 0,
                     "aborted": 0,
+                    "cache_hits": 0,
+                    "lookups": 2,
+                    "deferred": 0,
                 },
             )
             self.assertEqual(ID3(missing).getall("USLT")[0].text, "Backfilled line")

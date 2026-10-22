@@ -22,6 +22,7 @@ from utils import create_hidden_playlist_link_file
 from datetime import datetime
 from typing import Callable, Union
 from zotify_lyrics import ZotifyAuthError, ZotifyTokenProvider
+from lyrics_cache import LyricsCache
 from playlist_duplicates import analyze_playlist_duplicates, format_playlist_duplicate_report
 
 # Import centralized Spotify API helpers and song ID management functions.
@@ -32,6 +33,9 @@ from spotify_api import (
     fetch_track_lyrics,
     LYRICS_OK,
     LYRICS_AUTH_ERROR,
+    LYRICS_UNAVAILABLE,
+    LYRICS_RATE_LIMITED,
+    lyrics_retry_after,
 )
 from song_ids_manager import (
     reconcile_song_ids_flip_ids as sid_reconcile_song_ids_flip_ids,
@@ -59,6 +63,10 @@ def get_playlist_url():
         help="Skip embedding missing lyrics from Spotify into previously downloaded tracks",
     )
     parser.add_argument('--zotify-python', help="Zotify venv Python (or set ZOTIFY_PYTHON)")
+    parser.add_argument(
+        '--refresh-lyrics-cache', action='store_true',
+        help="Recheck cached lyrics results; still skips embedded lyrics and respects cooldowns",
+    )
     parser.add_argument('--zotify-config-location', help="Existing Zotify config file/directory")
     parser.add_argument('--zotify-credentials-location', help="Existing Zotify Login5 credentials file/directory")
     args = parser.parse_args()
@@ -295,6 +303,138 @@ def embed_lyrics_in_file(file_path: str, lyrics_text: str) -> str:
     return "embedded"
 
 
+def reuse_playlist_files(playlist_dir, track_metadata, track_ids, search_roots):
+    """Reuse local audio/lyrics before any Spotify lookup; never modify sources.
+
+    Index each library tree once, prefer a copy with lyrics, and never replace
+    existing playlist audio. Existing blank copies receive only missing lyrics.
+    """
+    playlist_root = Path(playlist_dir).resolve()
+    stats = {"copied": 0, "lyrics_reused": 0, "errors": 0}
+    needed = {}
+    for _, name, _ in track_metadata:
+        if Path(name).name != name or not name.lower().endswith(".mp3"):
+            continue
+        target = _find_playlist_file(playlist_root, name)
+        try:
+            if target and file_lyrics_state(target) != "missing":
+                continue
+            if target and track_ids.get(name):
+                try:
+                    target_tags = ID3(target)
+                except ID3NoHeaderError:
+                    pass
+                else:
+                    target_ids = {
+                        str(value) for frame in target_tags.getall("TXXX") if frame.desc.upper() == "TRACKID"
+                        for value in frame.text if str(value)
+                    }
+                    if target_ids - {track_ids[name]}:
+                        continue
+        except Exception:
+            continue  # The normal lyrics scan reports corrupt playlist files.
+        needed[name] = target
+    if not needed:
+        return stats
+
+    by_key = defaultdict(set)
+    by_id = defaultdict(set)
+    for name in needed:
+        if track_ids.get(name):
+            by_id[track_ids[name]].add(name)
+        for variant in get_possible_filenames(name):
+            by_key[filename_match_key(variant)].add(name)
+    candidates = defaultdict(list)
+    seen_paths = set()
+    for search_root in dict.fromkeys(Path(root).resolve() for root in search_roots):
+        for directory, dirs, files in os.walk(search_root):
+            folder = Path(directory).resolve()
+            if folder.is_relative_to(playlist_root):
+                dirs[:] = []
+                continue
+            dirs.sort()
+            archive_ids = defaultdict(set)
+            try:
+                archive_lines = (folder / ".song_ids").read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeError):
+                archive_lines = []
+            for line in archive_lines:
+                parts = line.split("\t")
+                if len(parts) == 5:
+                    matched = find_matching_filename(parts[4], files)
+                    if matched:
+                        archive_ids[matched].add(parts[0])
+            for actual_name in sorted(files):
+                if not actual_name.lower().endswith(".mp3"):
+                    continue
+                names = set(by_key.get(filename_match_key(actual_name), set()))
+                if not names:
+                    unsuffixed = re.sub(r"_\d+(?=\.mp3$)", "", actual_name, flags=re.IGNORECASE)
+                    names.update(by_key.get(filename_match_key(unsuffixed), set()))
+                for track_id in archive_ids[actual_name]:
+                    names.update(by_id.get(track_id, set()))
+                if len(names) != 1:
+                    continue
+                source = folder / actual_name
+                if source.is_symlink() or not source.resolve().is_relative_to(search_root):
+                    continue
+                if source in seen_paths:
+                    continue
+                seen_paths.add(source)
+                try:
+                    tags = ID3(source)
+                except ID3NoHeaderError:
+                    text = ""
+                    embedded_ids = set()
+                except Exception:
+                    stats["errors"] += 1
+                    continue
+                else:
+                    text = next((frame.text for frame in tags.getall("USLT") if frame.text.strip()), "")
+                    embedded_ids = {
+                        str(value) for frame in tags.getall("TXXX") if frame.desc.upper() == "TRACKID"
+                        for value in frame.text if str(value)
+                    }
+                name = next(iter(names))
+                known_ids = embedded_ids | archive_ids[actual_name]
+                expected_id = track_ids.get(name)
+                if expected_id and known_ids - {expected_id}:
+                    continue  # Same display name does not prove the same recording.
+                candidates[name].append((source, text, bool(expected_id and expected_id in known_ids)))
+
+    for name, target in needed.items():
+        choices = sorted(candidates[name], key=lambda item: (not item[2], not bool(item[1]), str(item[0])))
+        if not choices:
+            continue
+        source, text, _ = choices[0]
+        if target:
+            if text:
+                try:
+                    if embed_lyrics_in_file(target, strip_lyric_timestamps(text)) == "embedded":
+                        stats["lyrics_reused"] += 1
+                except Exception as error:
+                    stats["errors"] += 1
+                    CustomPrint.bold_print(f"!!! Unable to reuse local lyrics for {name}: {error}", "RED")
+            continue
+        destination = playlist_root / name
+        if destination.exists() or destination.is_symlink():
+            continue
+        created = False
+        try:
+            with source.open("rb") as src, destination.open("xb") as dst:
+                created = True
+                shutil.copyfileobj(src, dst)
+            shutil.copystat(source, destination)
+        except OSError as error:
+            if created:
+                destination.unlink(missing_ok=True)
+            stats["errors"] += 1
+            CustomPrint.bold_print(f"!!! Unable to copy local track {name}: {error}", "RED")
+        else:
+            stats["copied"] += 1
+    return stats
+
+
 def backfill_playlist_lyrics(
     playlist_dir: str,
     track_metadata: list[tuple[str, str, str]],
@@ -303,8 +443,10 @@ def backfill_playlist_lyrics(
     *,
     fetch=fetch_track_lyrics,
     sleep=time.sleep,
-    delay_seconds: float = 0.35,
+    delay_seconds: float = 1.0,
     max_consecutive_errors: int = 3,
+    cache: LyricsCache | None = None,
+    refresh_cache: bool = False,
 ) -> dict[str, int]:
     """Fetch missing lyrics from Spotify and embed them into playlist MP3s.
 
@@ -313,6 +455,9 @@ def backfill_playlist_lyrics(
     playlist folder, dedupes by resolved path) and only ever writes files
     whose lyrics are empty. Uses Zotify's color-lyrics endpoint via
     fetch_track_lyrics; 'already_present' files are never touched.
+    Classify the whole playlist first so an API abort cannot hide local counts.
+    An optional shared cache remembers results and provider cooldowns; memory
+    reuse prevents repeated requests for the same ID even without disk caching.
     """
     stats = {
         "embedded": 0,
@@ -323,6 +468,9 @@ def backfill_playlist_lyrics(
         "unsupported_version": 0,
         "errors": 0,
         "aborted": 0,
+        "cache_hits": 0,
+        "lookups": 0,
+        "deferred": 0,
     }
     if not bearer_token:
         stats["aborted"] = 1
@@ -331,6 +479,8 @@ def backfill_playlist_lyrics(
     processed_paths = set()
     playlist_root = Path(playlist_dir).resolve()
     consecutive_errors = 0
+    track_results = {}
+    pending = []
 
     for _, original_file_name, _ in track_metadata:
         file_path = _find_playlist_file(playlist_root, original_file_name)
@@ -365,14 +515,42 @@ def backfill_playlist_lyrics(
         if not track_id:
             stats["no_track_id"] += 1
             continue
+        pending.append((file_path, track_id))
 
+    for file_path, track_id in pending:
+        new_lookup = False
         try:
-            status, lyrics_text = fetch(track_id, bearer_token)
+            cached = track_results.get(track_id)
+            if cached is None and cache is not None and not refresh_cache:
+                cached = cache.get(track_id)
+            if cached is not None:
+                stats["cache_hits"] += 1
+                status, lyrics_text = cached
+            else:
+                if not stats["aborted"] and cache is not None:
+                    remaining = cache.cooldown_remaining()
+                    if remaining > 0:
+                        CustomPrint.bold_print(
+                            f"!!! Lyrics lookup cooldown active ({remaining:.0f}s remaining); "
+                            "using cached results only.", "YELLOW",
+                        )
+                        stats["aborted"] = 1
+                if stats["aborted"]:
+                    stats["deferred"] += 1
+                    continue
+                if stats["lookups"]:
+                    sleep(delay_seconds)
+                stats["lookups"] += 1
+                new_lookup = True
+                status, lyrics_text = fetch(track_id, bearer_token)
+                track_results[track_id] = (status, lyrics_text)
+                if cache is not None:
+                    cache.put(track_id, status, lyrics_text)
         except ZotifyAuthError as error:
             CustomPrint.bold_print(f"!!! {error} Lyrics backfill aborted for this run.", "RED")
             stats["errors"] += 1
             stats["aborted"] = 1
-            break
+            continue
         if status == LYRICS_AUTH_ERROR:
             provider_name = "Zotify Login5 session" if callable(bearer_token) else "supplied bearer"
             CustomPrint.bold_print(
@@ -381,14 +559,28 @@ def backfill_playlist_lyrics(
                 "This is an authorization failure, not a missing-lyrics result.",
                 "RED",
             )
+            stats["errors"] += 1
             stats["aborted"] = 1
-            break
+            continue
+        if status == LYRICS_RATE_LIMITED:
+            seconds = lyrics_retry_after(lyrics_text)
+            if cache is not None:
+                cache.defer(seconds)
+            CustomPrint.bold_print(
+                f"!!! Spotify lyrics HTTP 429 (track {track_id}); "
+                f"pausing lookups for at least {seconds:.0f}s. Cached results are still usable.",
+                "YELLOW",
+            )
+            stats["errors"] += 1
+            stats["aborted"] = 1
+            continue
         if status == LYRICS_OK:
+            if new_lookup:
+                consecutive_errors = 0
             try:
                 result = embed_lyrics_in_file(file_path, lyrics_text)
             except Exception as error:
                 stats["errors"] += 1
-                consecutive_errors += 1
                 CustomPrint.bold_print(
                     f"!!! ERROR: Unable to embed lyrics for {os.path.basename(file_path)}: {error}",
                     "RED",
@@ -396,29 +588,39 @@ def backfill_playlist_lyrics(
             else:
                 if result == "embedded":
                     stats["embedded"] += 1
-                    consecutive_errors = 0
                     CustomPrint.bold_print(
                         f">>> Embedded Spotify lyrics: {os.path.basename(file_path)}"
                     )
                 else:
                     stats[result] += 1
-        elif status == "unavailable":
+        elif status == LYRICS_UNAVAILABLE:
             stats["unavailable"] += 1
-            consecutive_errors = 0
+            if new_lookup:
+                consecutive_errors = 0
         else:
             stats["errors"] += 1
-            consecutive_errors += 1
+            if new_lookup:
+                consecutive_errors += 1
+                CustomPrint.bold_print(
+                    f"!!! Lyrics lookup failed (track {track_id}; {lyrics_text or 'API error'}).",
+                    "YELLOW",
+                )
 
-        if consecutive_errors >= max_consecutive_errors:
+        if not stats["aborted"] and consecutive_errors >= max_consecutive_errors:
             CustomPrint.bold_print(
                 "!!! Lyrics backfill aborted after repeated API failures - "
                 "will resume on the next run.",
                 "YELLOW",
             )
             stats["aborted"] = 1
-            break
-        sleep(delay_seconds)
+            if cache is not None:
+                cache.defer(60)
 
+    if cache is not None and cache.failed:
+        CustomPrint.bold_print(
+            "!!! Lyrics cache unavailable; this run used memory-only results. "
+            "Persistent caching/cooldowns could not be saved.", "YELLOW",
+        )
     return stats
 
 
@@ -720,18 +922,6 @@ if __name__ == "__main__":
         # When calling the function, pass the sanitized playlist name:
         remove_extra_hidden_files(playlist_dir, sanitized_playlist_name)
 
-
-        # Function to find and copy the relevant metadata line from the source .song_ids file
-        def copy_metadata_line(src_dir, author_name, song_name, dest_song_ids_file):
-            src_song_ids_file = os.path.join(src_dir, ".song_ids")
-            if os.path.exists(src_song_ids_file):
-                with open(src_song_ids_file, "r", encoding="utf-8") as file:
-                    for line in file:
-                        parts = line.strip().split("\t")
-                        if len(parts) == 5 and parts[2] == author_name and parts[3] == song_name:
-                            with open(dest_song_ids_file, "a", encoding="utf-8") as dest_file:
-                                dest_file.write(line)
-                            return
 
 
         def _norm_key(artist: str, title: str) -> tuple[str, str]:
@@ -1112,7 +1302,15 @@ if __name__ == "__main__":
 
         # Build exact playlist tracks (artist, title, id)
         playlist_tracks = extract_playlist_tracks(tracks)
-
+        track_ids = build_playlist_track_ids(tracks)
+        local_files_dir = os.path.join(home_dir, "Music", "Local Files")
+        reuse_stats = reuse_playlist_files(
+            playlist_dir, track_metadata, track_ids, [base_music_path, local_files_dir],
+        )
+        CustomPrint.bold_print(
+            f">>> Local reuse: copied={reuse_stats['copied']}, "
+            f"lyrics reused={reuse_stats['lyrics_reused']}, errors={reuse_stats['errors']}."
+        )
 
         # Reconcile .song_ids with what's actually on disk (remove orphans)
         CustomPrint.bold_print(">>> Reconciling .song_ids with files on disk...", "YELLOW")
@@ -1244,37 +1442,6 @@ if __name__ == "__main__":
             # Then, in a second cleanup step, delete any .mp3 files that still don't exactly match.
             cleanup_non_matching_files(playlist_dir, m3u8_file, playlist_tracks)
 
-        # Now, proceed to process track metadata and copy files as needed.
-        for file_name, original_file_name, release_year in track_metadata:
-            src_file = None
-            for root, dirs, files in os.walk(base_music_path):
-                if file_name in files:
-                    src_file = os.path.join(root, file_name)
-                    src_dir = root  # Store the source directory
-                    break
-
-            if src_file:
-                dest_file = os.path.join(playlist_dir, file_name)
-                if not os.path.exists(dest_file):
-                    shutil.copy2(src_file, dest_file)
-
-                    # Extract author_name and song_name from the original_file_name
-                    parts = original_file_name.rsplit(".", 1)[0].split(" - ")
-                    if len(parts) < 2:
-                        CustomPrint.bold_print(f">>> WARNING: Unexpected file name format: {original_file_name}")
-                        author_name = "Unknown"
-                        song_name = original_file_name.rsplit(".", 1)[0]
-                    else:
-                        author_name = parts[0]
-                        song_name = " - ".join(parts[1:])
-
-                    # Create the destination .song_ids file if it doesn't exist
-                    dest_song_ids_file = os.path.join(playlist_dir, ".song_ids")
-                    if not os.path.exists(dest_song_ids_file):
-                        open(dest_song_ids_file, "w", encoding="utf-8").close()
-
-                    # Copy the relevant metadata line to the destination .song_ids file
-                    copy_metadata_line(src_dir, author_name, song_name, dest_song_ids_file)
 
         TIMEOUT_SECONDS = 30  # Timeout duration in seconds
         MAX_RETRIES = 3
@@ -1528,8 +1695,10 @@ if __name__ == "__main__":
             backfill_stats = backfill_playlist_lyrics(
                 playlist_dir,
                 track_metadata,
-                build_playlist_track_ids(tracks),
+                track_ids,
                 lyrics_token,
+                cache=LyricsCache(),
+                refresh_cache=extractor_args.refresh_lyrics_cache,
             )
             CustomPrint.bold_print(
                 "*** Lyrics backfill: "
@@ -1539,7 +1708,9 @@ if __name__ == "__main__":
                 f"no track id={backfill_stats['no_track_id']}, "
                 f"unmatched={backfill_stats['unmatched']}, "
                 f"unsupported version={backfill_stats['unsupported_version']}, "
-                f"errors={backfill_stats['errors']}"
+                f"errors={backfill_stats['errors']}, "
+                f"lookups={backfill_stats['lookups']}, cached results={backfill_stats['cache_hits']}, "
+                f"deferred={backfill_stats['deferred']}"
                 + (", ABORTED" if backfill_stats["aborted"] else "")
                 + ".",
                 "GREEN" if not backfill_stats["aborted"] else "RED",
